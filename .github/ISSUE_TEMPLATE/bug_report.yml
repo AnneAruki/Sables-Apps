@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a repeatable problem in one of Sable's apps.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping make Sable calmer and safer. Remove personal book paths, account details, tokens, and private library metadata before attaching screenshots or logs.
+  - type: dropdown
+    id: app
+    attributes:
+      label: App
+      options:
+        - Sable's Library
+        - Sable's Clinic
+        - Sable's Covers
+        - Shared project or build
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 26.0
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Sable revision
+      description: A commit hash, branch, or release name is enough.
+      placeholder: e.g. main at abc1234
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open...
+        2. Choose...
+        3. See...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Privacy-safe evidence
+      description: Add screenshots, errors, or logs only after removing personal paths, credentials, and library metadata.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed tokens, sessions, personal paths, account details, and private library metadata.
+          required: true

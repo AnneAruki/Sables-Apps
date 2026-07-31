@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/AnneAruki/Sables-Apps/security/advisories/new
+    about: Report credentials, private-data exposure, or another security issue without publishing it.

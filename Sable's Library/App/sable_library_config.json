@@ -1,0 +1,207 @@
+{
+  "config_version": 1,
+  "book_extensions": [
+    ".epub",
+    ".pdf",
+    ".kepub",
+    ".cbz",
+    ".cbr",
+    ".cb7",
+    ".mobi",
+    ".azw",
+    ".azw3",
+    ".ibooks",
+    ".iba",
+    ".djvu"
+  ],
+  "video_extensions": [
+    ".mkv",
+    ".mp4",
+    ".m4v",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".webm",
+    ".ts",
+    ".m2ts"
+  ],
+  "package_extensions": [
+    ".epub",
+    ".ibooks",
+    ".iba"
+  ],
+  "duplicate_folder_name": "_Possible Duplicates",
+  "missing_number_folder_name": "_Missing Numbers",
+  "report_folder_name": "_Sable's Library Reports",
+  "comicinfo_file_name": "ComicInfo.json",
+  "animeinfo_file_name": "AnimeInfo.json",
+  "ignore_names": [
+    "_Possible Duplicates",
+    "_Missing Numbers",
+    "_Sable's Library Reports",
+    "_Do Not Touch",
+    "Sable Library Catalog.csv",
+    "Manga To Sort Later"
+  ],
+  "ignore_globs": [
+    "*.tmp",
+    "*.part"
+  ],
+  "source_metadata_terms": [
+    "digital",
+    "digital edition",
+    "uploaded",
+    "uploader",
+    "scan",
+    "scans",
+    "1r0n",
+    "c1fi7",
+    "ed",
+    "edited",
+    "j novel club",
+    "j-novel club",
+    "premium",
+    "kobo",
+    "lnwncentral",
+    "premium lnwncentral",
+    "premium_lnwcentral",
+    "kobo lnwncentral",
+    "kobo_lnwcentral",
+    "Cross Infinite World",
+    "Extra Edition",
+    "Hanashi Media",
+    "Oak",
+    "Digital Manga Guild",
+    "HentaiOcean",
+    "Kindle",
+    "enjugroup",
+    "Seven Seas",
+    "Tokyopop",
+    "Stick",
+    "Zaphkiel",
+    "Dale",
+    "LuCaZ",
+    "danke-Empire",
+    "F",
+    "Shellshock"
+  ],
+  "features": {
+    "rename_top_level_folders": true,
+    "organize_loose_books": true,
+    "group_chapters_into_volume_folders": false,
+    "rename_book_files": true,
+    "quarantine_duplicates": true
+  },
+  "behavior": {
+    "organize_single_items": true,
+    "move_single_items_into_similar_existing_folders": true,
+    "skip_collisions": true,
+    "remove_trailing_metadata_from_file_names": true,
+    "normalize_extension_case": true,
+    "convert_all_markers_to_vol": false,
+    "parse_plain_number_after_folder_title": true,
+    "number_width": 2,
+    "keep_looping_until_stable": true
+  },
+  "duplicates": {
+    "use_hash_for_duplicates": true
+  },
+  "chapters": {
+    "chapter_number_width": 4
+  },
+  "reporting": {
+    "detail_limit": 200,
+    "max_apply_passes": 20
+  },
+  "reports": {
+    "enabled": true,
+    "preview_report": "_sable_preview_report.txt",
+    "parse_warnings_report": "_sable_parse_warnings.txt",
+    "metadata_report": "_sable_metadata_candidates.txt",
+    "publisher_summary_report": "_sable_publisher_summary.txt",
+    "needs_review_report": "_sable_needs_review.txt",
+    "comicinfo_title_report": "_sable_comicinfo_title_assist.txt",
+    "comicinfo_refresh_report": "_sable_comicinfo_refresh.txt",
+    "undo_plan_json": "_sable_undo_plan.json",
+    "restore_report": "_sable_restore_report.txt",
+    "run_summary_report": "_sable_run_summary.txt",
+    "catalog_json": "_sable_catalog.json",
+    "root_catalog_csv": "Sable Library Catalog.csv",
+    "summary_json": "_sable_run_summary.json",
+    "mangabaka_queue_json": "_sable_mangabaka_queue.json"
+  },
+  "parsing": {
+    "catalog_include_comicinfo": true
+  },
+  "mangabaka": {
+    "enabled": true,
+    "api_base_url": "https://api.mangabaka.org/v1/",
+    "max_search_results": 10,
+    "request_delay_seconds": 1.0,
+    "timeout_seconds": 15,
+    "preferred_type": "novel",
+    "naming_mode": "metadata_only"
+  },
+  "metadata_providers": {
+    "ranobedb": {
+      "enabled": true,
+      "api_base_url": "https://ranobedb.org/api/v0/",
+      "request_delay_seconds": 1.1,
+      "timeout_seconds": 15,
+      "cache_ttl_seconds": 604800,
+      "requires_api_key": false
+    },
+    "open_library": {
+      "enabled": true,
+      "api_base_url": "https://openlibrary.org/",
+      "request_delay_seconds": 1.0,
+      "timeout_seconds": 15,
+      "cache_ttl_seconds": 604800,
+      "requires_api_key": false
+    },
+    "anilist": {
+      "enabled": true,
+      "api_base_url": "https://graphql.anilist.co/",
+      "request_delay_seconds": 2.1,
+      "timeout_seconds": 15,
+      "cache_ttl_seconds": 604800,
+      "requires_api_key": false
+    },
+    "tvmaze": {
+      "enabled": true,
+      "api_base_url": "https://api.tvmaze.com/",
+      "request_delay_seconds": 0.6,
+      "timeout_seconds": 15,
+      "cache_ttl_seconds": 604800,
+      "requires_api_key": false
+    },
+    "wikidata": {
+      "enabled": true,
+      "api_base_url": "https://query.wikidata.org/sparql",
+      "request_delay_seconds": 1.0,
+      "timeout_seconds": 15,
+      "cache_ttl_seconds": 604800,
+      "requires_api_key": false
+    },
+    "tmdb": {
+      "enabled": false,
+      "api_base_url": "https://api.themoviedb.org/3/",
+      "request_delay_seconds": 1.0,
+      "timeout_seconds": 15,
+      "cache_ttl_seconds": 604800,
+      "requires_api_key": true
+    },
+    "tvdb": {
+      "enabled": false,
+      "api_base_url": "https://api4.thetvdb.com/v4/",
+      "request_delay_seconds": 1.0,
+      "timeout_seconds": 15,
+      "cache_ttl_seconds": 604800,
+      "requires_api_key": true
+    }
+  },
+  "aliases": {
+    "approved": {},
+    "rejected": {}
+  }
+}

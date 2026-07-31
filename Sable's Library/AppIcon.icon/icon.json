@@ -1,0 +1,57 @@
+{
+  "fill" : {
+    "automatic-gradient" : "display-p3:0.03500,0.31000,0.26000,1.00000",
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 1
+      }
+    }
+  },
+  "groups" : [
+    {
+      "blur-material" : 0.15,
+      "layers" : [
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "library-icon.png",
+          "name" : "Sable's Library",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting" : "combined",
+      "opacity-specializations" : [
+        {
+          "appearance" : "tinted",
+          "value" : 0.94
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.18
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.08
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

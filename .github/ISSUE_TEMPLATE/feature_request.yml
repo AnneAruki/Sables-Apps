@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a focused improvement to a Sable workflow.
+title: "[Idea]: "
+labels:
+  - enhancement
+body:
+  - type: dropdown
+    id: app
+    attributes:
+      label: App
+      options:
+        - Sable's Library
+        - Sable's Clinic
+        - Sable's Covers
+        - Shared app family
+    validations:
+      required: true
+  - type: textarea
+    id: burden
+    attributes:
+      label: What work or confusion would this reduce?
+      description: Describe the current workflow and where it costs time, clarity, safety, or control.
+    validations:
+      required: true
+  - type: textarea
+    id: direction
+    attributes:
+      label: Suggested direction
+      description: Explain the smallest useful improvement. Mockups are welcome but not required.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today?
+      description: Share any workaround or manual process that currently helps.
