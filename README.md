@@ -12,6 +12,22 @@ This repository contains three apps in one Xcode project:
 
 All three apps are built around the same rule: **inspect first, show the proposed result, and change only what the user confirms.**
 
+## Screenshots
+
+### Sable's Library
+
+![Sable's Library reviewing provider matches before any changes are applied](docs/screenshots/library-provider-review.jpg)
+
+### Sable's Clinic
+
+![Sable's Clinic showing progress during an EPUB health check](docs/screenshots/clinic-active-check.png)
+
+### Sable's Covers
+
+| Browse MangaBaka | Review and compare sources |
+| --- | --- |
+| ![Sable's Covers browsing MangaBaka series by publisher, publication date, media type, and cover state](docs/screenshots/covers-browse.jpg) | ![Sable's Covers comparing matched storefront series before preparing cover changes](docs/screenshots/covers-source-review.jpg) |
+
 ## Platform
 
 Sable is a SwiftUI macOS project. It currently requires a recent Xcode and macOS SDK matching the deployment target in the project.
