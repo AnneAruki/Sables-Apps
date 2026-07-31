@@ -772,14 +772,6 @@ struct SableLibrarySettingsView: View {
 
                         Divider()
 
-                        providerCredentialField(
-                            title: "Yen Press search token",
-                            detail: "Optional. Enables Yen Press catalog searches without bundling a shared credential in the app.",
-                            text: $providerCredentials.yenPressSearchToken
-                        )
-
-                        Divider()
-
                         rolerContributorAccessControls
 
                         Divider()

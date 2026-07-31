@@ -247,22 +247,22 @@ nonisolated struct SableLibraryUserSettings {
 private nonisolated struct SableLibraryProviderCredentialStore {
     private let service = "SableLibrary.MetadataProviderCredentials"
     private let legacyMALAccount = "myAnimeListClientID"
+    private let legacyYenPressSearchTokenAccount = "yenPressSearchToken"
 
     private enum Account: String, CaseIterable {
         case tmdbAccessToken
         case tvdbAccessToken
         case mangaBakaPersonalAccessToken
-        case yenPressSearchToken
         case rolerUserToken
         case rolerSessionID
     }
 
     func load() -> SableLibraryProviderCredentials {
+        delete(accountName: legacyYenPressSearchTokenAccount)
         var credentials = SableLibraryProviderCredentials()
         credentials.tmdbAccessToken = read(.tmdbAccessToken) ?? ""
         credentials.tvdbAccessToken = read(.tvdbAccessToken) ?? ""
         credentials.mangaBakaPersonalAccessToken = read(.mangaBakaPersonalAccessToken) ?? ""
-        credentials.yenPressSearchToken = read(.yenPressSearchToken) ?? ""
         credentials.rolerUserToken = read(.rolerUserToken) ?? ""
         credentials.rolerSessionID = read(.rolerSessionID) ?? ""
         return credentials
@@ -270,11 +270,11 @@ private nonisolated struct SableLibraryProviderCredentialStore {
 
     func save(_ credentials: SableLibraryProviderCredentials) -> Bool {
         delete(accountName: legacyMALAccount)
+        delete(accountName: legacyYenPressSearchTokenAccount)
         let results = [
             write(credentials.tmdbAccessToken, account: .tmdbAccessToken),
             write(credentials.tvdbAccessToken, account: .tvdbAccessToken),
             write(credentials.mangaBakaPersonalAccessToken, account: .mangaBakaPersonalAccessToken),
-            write(credentials.yenPressSearchToken, account: .yenPressSearchToken),
             write(credentials.rolerUserToken, account: .rolerUserToken),
             write(credentials.rolerSessionID, account: .rolerSessionID)
         ]
@@ -284,6 +284,7 @@ private nonisolated struct SableLibraryProviderCredentialStore {
     func clear() {
         Account.allCases.forEach(delete)
         delete(accountName: legacyMALAccount)
+        delete(accountName: legacyYenPressSearchTokenAccount)
     }
 
     private func read(_ account: Account) -> String? {

@@ -142,7 +142,6 @@ Optional credentials are entered by each user in app Settings and stored in the 
 
 - **MangaBaka personal access token** for contributor snapshots, preview, and apply.
 - **Roler sign-in** for confirmed series mappings and volume-number corrections.
-- **Yen Press search token** for optional Yen Press catalog search.
 - **TMDB and TVDB credentials** for optional metadata work outside Covers.
 
 Public and no-key sources may still receive the title or provider identifier needed for an explicit search. Sable does not upload a user's entire library to a provider.

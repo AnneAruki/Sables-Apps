@@ -350,7 +350,6 @@ nonisolated struct SableLibraryProviderCredentials: Codable, Sendable, Equatable
     var tmdbAccessToken = ""
     var tvdbAccessToken = ""
     var mangaBakaPersonalAccessToken = ""
-    var yenPressSearchToken = ""
     var rolerUserToken = ""
     var rolerSessionID = ""
 
@@ -364,14 +363,12 @@ nonisolated struct SableLibraryProviderCredentials: Codable, Sendable, Equatable
         tmdbAccessToken: String = "",
         tvdbAccessToken: String = "",
         mangaBakaPersonalAccessToken: String = "",
-        yenPressSearchToken: String = "",
         rolerUserToken: String = "",
         rolerSessionID: String = ""
     ) {
         self.tmdbAccessToken = tmdbAccessToken
         self.tvdbAccessToken = tvdbAccessToken
         self.mangaBakaPersonalAccessToken = mangaBakaPersonalAccessToken
-        self.yenPressSearchToken = yenPressSearchToken
         self.rolerUserToken = rolerUserToken
         self.rolerSessionID = rolerSessionID
     }
@@ -384,7 +381,6 @@ nonisolated struct SableLibraryProviderCredentials: Codable, Sendable, Equatable
             String.self,
             forKey: .mangaBakaPersonalAccessToken
         ) ?? ""
-        yenPressSearchToken = ""
         rolerUserToken = ""
         rolerSessionID = ""
     }
@@ -393,7 +389,6 @@ nonisolated struct SableLibraryProviderCredentials: Codable, Sendable, Equatable
         !tmdbAccessToken.trimmedForCredential.isEmpty
             || !tvdbAccessToken.trimmedForCredential.isEmpty
             || !mangaBakaPersonalAccessToken.trimmedForCredential.isEmpty
-            || !yenPressSearchToken.trimmedForCredential.isEmpty
             || !rolerUserToken.trimmedForCredential.isEmpty
             || !rolerSessionID.trimmedForCredential.isEmpty
     }

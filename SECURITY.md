@@ -7,7 +7,7 @@ Sable works with real personal libraries and optional contributor accounts. Plea
 - The repository contains no production tokens, sessions, passwords, or API keys.
 - Credentials entered in Settings are stored in the macOS Keychain.
 - Do not paste credentials into issues, screenshots, logs, fixtures, source files, or pull requests.
-- Use your own MangaBaka, Roler, TMDB, TVDB, or Yen Press access where a workflow asks for it.
+- Use your own MangaBaka, Roler, TMDB, or TVDB access where a workflow asks for it.
 
 If you accidentally commit a credential, revoke it with the provider first. Removing it from a later commit does not remove it from Git history.
 
