@@ -834,6 +834,125 @@ nonisolated struct SableAudibleCatalogClient: Sendable {
     }
 }
 
+nonisolated enum SableAppleBooksCatalogClientError: LocalizedError, Sendable {
+    case invalidURL
+    case invalidResponse
+    case server(status: Int)
+    case decoding(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            "Apple Books search could not be prepared."
+        case .invalidResponse:
+            "Apple Books returned an unreadable response."
+        case .server(let status):
+            "Apple Books returned \(status)."
+        case .decoding(let message):
+            "Apple Books results could not be read: \(message)"
+        }
+    }
+}
+
+nonisolated struct SableAppleBooksCatalogClient: Sendable {
+    struct Product: Decodable, Sendable, Equatable {
+        var wrapperType: String?
+        var collectionID: Int64
+        var artistName: String?
+        var collectionName: String
+        var collectionViewURL: String?
+        var artworkURL100: String?
+
+        enum CodingKeys: String, CodingKey {
+            case wrapperType
+            case collectionID = "collectionId"
+            case artistName
+            case collectionName
+            case collectionViewURL = "collectionViewUrl"
+            case artworkURL100 = "artworkUrl100"
+        }
+
+        var preferredCoverURL: String? {
+            guard let artworkURL100 else { return nil }
+            return artworkURL100.replacingOccurrences(
+                of: #"/\d+x\d+(?:bb|bb-[^/.]+)?\.(?:jpg|jpeg|png|webp)$"#,
+                with: "/10000x0w-999.jpg",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+
+        var fallbackCoverURLs: [String] {
+            guard let artworkURL100 else { return [] }
+            return [artworkURL100].filter { $0 != preferredCoverURL }
+        }
+    }
+
+    private struct CatalogResponse: Decodable {
+        var results: [Product]
+    }
+
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 25
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpMaximumConnectionsPerHost = 2
+        return URLSession(configuration: configuration)
+    }()
+
+    func search(query: String) async throws -> [Product] {
+        var components = URLComponents(string: "https://itunes.apple.com/search")
+        components?.queryItems = [
+            URLQueryItem(name: "term", value: query),
+            URLQueryItem(name: "country", value: "US"),
+            URLQueryItem(name: "media", value: "audiobook"),
+            URLQueryItem(name: "entity", value: "audiobook"),
+            URLQueryItem(name: "limit", value: "200")
+        ]
+        return try await products(from: components?.url)
+    }
+
+    func lookup(collectionID: String) async throws -> [Product] {
+        var components = URLComponents(string: "https://itunes.apple.com/lookup")
+        components?.queryItems = [
+            URLQueryItem(name: "id", value: collectionID),
+            URLQueryItem(name: "country", value: "US"),
+            URLQueryItem(name: "entity", value: "audiobook")
+        ]
+        return try await products(from: components?.url)
+    }
+
+    private func products(from url: URL?) async throws -> [Product] {
+        guard let url else {
+            throw SableAppleBooksCatalogClientError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.setValue("Sable-Covers/1.0", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await Self.session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw SableAppleBooksCatalogClientError.invalidResponse
+        }
+        guard 200..<300 ~= http.statusCode else {
+            throw SableAppleBooksCatalogClientError.server(status: http.statusCode)
+        }
+        guard !data.isEmpty, data.count <= 8_000_000 else {
+            throw SableAppleBooksCatalogClientError.invalidResponse
+        }
+        return try Self.products(from: data)
+    }
+
+    static func products(from data: Data) throws -> [Product] {
+        do {
+            return try JSONDecoder().decode(CatalogResponse.self, from: data).results
+        } catch {
+            throw SableAppleBooksCatalogClientError.decoding(
+                error.localizedDescription
+            )
+        }
+    }
+}
+
 nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
     enum AutomaticMediaTypeDisposition: Equatable {
         case accepted
@@ -1064,6 +1183,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
     private let providerClient = SableLibraryBigBookCoversClient()
     private let bookLiveClient = SableLibraryBookLiveSeriesGroupClient()
     private let audibleClient = SableAudibleCatalogClient()
+    private let appleBooksClient = SableAppleBooksCatalogClient()
     private static let imageSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
@@ -1492,7 +1612,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
 
         if references.count < storeSeriesURLs.count {
             notes.append(
-                "Some links were not recognized as BookLive, BookWalker, Amazon, Barnes & Noble, Audible, YES24, or Kyobo store pages."
+                "Some links were not recognized as BookLive, BookWalker, Amazon, Barnes & Noble, Audible, Apple Books, YES24, or Kyobo store pages."
             )
         }
         let result = await discover(
@@ -1555,7 +1675,13 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                         compatible: 1
                     )
                 )
-                let standardResult = reference.provider == .audibleUS
+                let selectionIsAudiobook =
+                    reference.publisherProvenMediaType == "audiobook"
+                    || selection.books.contains {
+                        $0.bookType?.lowercased().contains("audio") == true
+                            || $0.volumeType?.lowercased().contains("audio") == true
+                    }
+                let standardResult = selectionIsAudiobook
                     ? ProviderResult(suggestions: [], notes: [])
                     : await providerResult(
                         provider: reference.provider,
@@ -1572,6 +1698,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                     notes: []
                 )
                 if includesAudiobooks,
+                   selectionIsAudiobook,
                    Self.shouldDiscoverEnglishAudiobooks(
                     for: series,
                     provider: reference.provider
@@ -4384,7 +4511,10 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         from rawValue: String
     ) -> StoreSeriesReference? {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: value),
+        guard let url = URL(string: value)
+                ?? URL(string: value.addingPercentEncoding(
+                    withAllowedCharacters: .urlQueryAllowed
+                ) ?? ""),
               let host = url.host?.lowercased() else {
             return nil
         }
@@ -4461,6 +4591,28 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             return StoreSeriesReference(
                 provider: .audibleUS,
                 itemID: asin,
+                itemType: "book",
+                url: value,
+                languageOverride: "en",
+                publisherProvenMediaType: "audiobook"
+            )
+        }
+
+        if (host == "books.apple.com" || host.hasSuffix(".books.apple.com")),
+           let collectionID = firstPathCapture(
+            in: value,
+            pattern: #"(?i)/id([0-9]+)(?:[/?#]|$)"#
+           ) ?? firstPathCapture(
+            in: value,
+            pattern: #"/([0-9]{8,14})(?:[/?#]|$)"#
+           ) ?? url.path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .last
+            .map(String.init)
+            .flatMap({ $0.allSatisfy(\.isNumber) ? $0 : nil }) {
+            return StoreSeriesReference(
+                provider: .appleBooksUS,
+                itemID: collectionID,
                 itemType: "book",
                 url: value,
                 languageOverride: "en",
@@ -4650,7 +4802,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             if SableLibraryCoverDownloadPlanner
                 .preferredProviderBookTypeForDownload(mediaType: mediaType)
                 == "novel" {
-                providers.append(.audibleUS)
+                providers += [.audibleUS, .appleBooksUS]
             }
         }
         if requestedLanguages.contains("ko") {
@@ -4696,7 +4848,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         for series: SableMangaBakaSeriesSummary,
         provider: SableLibraryBigBookCoversProvider
     ) -> Bool {
-        provider == .audibleUS
+        [.audibleUS, .appleBooksUS, .bookWalkerGlobal].contains(provider)
             && SableLibraryCoverDownloadPlanner
                 .preferredProviderBookTypeForDownload(
                     mediaType: series.type
@@ -4717,6 +4869,14 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
 
         if provider == .audibleUS {
             return await discoverAudible(
+                query: query,
+                series: series,
+                progress: progress
+            )
+        }
+
+        if provider == .appleBooksUS {
+            return await discoverAppleBooks(
                 query: query,
                 series: series,
                 progress: progress
@@ -4770,14 +4930,26 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 in: candidates,
                 mediaType: series.type
             )
+            let audiobookRanked = ranked.filter {
+                Self.shouldDiscoverEnglishAudiobooks(
+                    for: series,
+                    provider: provider
+                )
+                    && $0.bookTypeWasExplicit
+                    && $0.bookType?.lowercased().contains("audio") == true
+            }
             let compatibleRanked = ranked.filter {
+                !$0.bookTypeWasExplicit
+                    || $0.bookType?.lowercased().contains("audio") != true
+            }
+            .filter {
                 Self.automaticMediaTypeDisposition(
                     detectedMediaType: Self.bbcSeriesMediaType($0),
                     expectedMediaType: series.type
                 ) != .rejected
             }
             let candidateLanes = Self.automaticSeriesCandidateLanes(
-                compatibleRanked
+                compatibleRanked + audiobookRanked
             )
             var results: [ProviderResult] = []
             if let selection = await selectedBooks(
@@ -4807,6 +4979,24 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                         selection: chapterSelection,
                         series: series,
                         offersMediaTypeMismatchForReview: false,
+                        progress: progress
+                    )
+                )
+            }
+            if let audiobookSelection = await selectedBooks(
+                from: candidateLanes.audiobooks,
+                provider: provider,
+                series: series,
+                expectedMediaType: "audiobook"
+            ) {
+                results.append(
+                    await providerResult(
+                        provider: provider,
+                        selection: audiobookSelection,
+                        series: series,
+                        trustsSelectedSeriesIdentity: true,
+                        expectedMediaType: "audiobook",
+                        requestedCoverType: "audiobook",
                         progress: progress
                     )
                 )
@@ -4854,19 +5044,27 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         _ candidates: [SableLibraryBigBookCoversSeriesCandidate]
     ) -> (
         volumes: [SableLibraryBigBookCoversSeriesCandidate],
-        chapters: [SableLibraryBigBookCoversSeriesCandidate]
+        chapters: [SableLibraryBigBookCoversSeriesCandidate],
+        audiobooks: [SableLibraryBigBookCoversSeriesCandidate]
     ) {
         var volumes: [SableLibraryBigBookCoversSeriesCandidate] = []
         var chapters: [SableLibraryBigBookCoversSeriesCandidate] = []
+        var audiobooks: [SableLibraryBigBookCoversSeriesCandidate] = []
         for candidate in candidates {
-            if SableLibraryProviderCandidateParser
+            if candidate.bookTypeWasExplicit,
+               candidate.bookType?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .contains("audio") == true {
+                audiobooks.append(candidate)
+            } else if SableLibraryProviderCandidateParser
                 .storefrontTitleIsChapterSerial(candidate.title) {
                 chapters.append(candidate)
             } else {
                 volumes.append(candidate)
             }
         }
-        return (volumes, chapters)
+        return (volumes, chapters, audiobooks)
     }
 
     private static func bbcSeriesMediaType(
@@ -4940,6 +5138,180 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 notes: ["Audible: \(error.localizedDescription)"]
             )
         }
+    }
+
+    private func discoverAppleBooks(
+        query: String,
+        series: SableMangaBakaSeriesSummary,
+        progress: (@Sendable (ProgressEvent) async -> Void)?
+    ) async -> ProviderResult {
+        guard Self.shouldDiscoverEnglishAudiobooks(
+            for: series,
+            provider: .appleBooksUS
+        ) else {
+            return ProviderResult(
+                suggestions: [],
+                notes: [
+                    "Apple Books: companion covers are only searched for novel series."
+                ]
+            )
+        }
+
+        do {
+            let products = try await appleBooksClient.search(query: query)
+            let requestedTitles = Self.audibleRequestedTitles(
+                for: series,
+                fallback: query
+            )
+            let selection = Self.appleBooksSeriesSelection(
+                from: products,
+                requestedTitles: requestedTitles,
+                series: series,
+                query: query
+            )
+            await progress?(
+                .seriesCandidatesFound(
+                    provider: .appleBooksUS,
+                    total: products.count,
+                    compatible: selection == nil ? 0 : 1
+                )
+            )
+            guard let selection else {
+                return ProviderResult(
+                    suggestions: [],
+                    notes: [
+                        "Apple Books: no matching English audiobook series was found."
+                    ]
+                )
+            }
+            return await providerResult(
+                provider: .appleBooksUS,
+                selection: selection,
+                series: series,
+                trustsSelectedSeriesIdentity: true,
+                expectedMediaType: "audiobook",
+                requestedCoverType: "audiobook",
+                progress: progress
+            )
+        } catch is CancellationError {
+            return ProviderResult(
+                suggestions: [],
+                notes: ["Apple Books: scan cancelled."]
+            )
+        } catch {
+            return ProviderResult(
+                suggestions: [],
+                notes: ["Apple Books: \(error.localizedDescription)"]
+            )
+        }
+    }
+
+    static func appleBooksSeriesSelection(
+        from products: [SableAppleBooksCatalogClient.Product],
+        requestedTitles: [String],
+        series: SableMangaBakaSeriesSummary,
+        query: String,
+        fallbackProviderSeriesID: String? = nil
+    ) -> (
+        title: String,
+        providerSeriesID: String,
+        books: [SableLibraryBigBookCoversBookCandidate]
+    )? {
+        let matches = products.compactMap { product -> (
+            product: SableAppleBooksCatalogClient.Product,
+            volume: Double,
+            coverURL: String
+        )? in
+            guard product.wrapperType?.lowercased() == "audiobook",
+                  let coverURL = product.preferredCoverURL,
+                  SableLibraryCoverDownloadPlanner.providerTitle(
+                    product.collectionName,
+                    belongsToAny: requestedTitles
+                  ),
+                  let volume = explicitProviderVolumeNumber(
+                    in: product.collectionName,
+                    series: series,
+                    language: "en"
+                  ) else {
+                return nil
+            }
+            return (product, volume, coverURL)
+        }
+        .sorted {
+            if $0.volume != $1.volume { return $0.volume < $1.volume }
+            return $0.product.collectionID < $1.product.collectionID
+        }
+
+        let providerSeriesID = fallbackProviderSeriesID
+            ?? "apple-books-\(normalizedScopeTitle(requestedTitles.first ?? query))"
+        let books = matches.enumerated().map { offset, match in
+            SableLibraryBigBookCoversBookCandidate(
+                provider: .appleBooksUS,
+                id: String(match.product.collectionID),
+                seriesID: providerSeriesID,
+                title: match.product.collectionName,
+                url: match.product.collectionViewURL
+                    ?? "https://books.apple.com/us/audiobook/id\(match.product.collectionID)",
+                coverURL: match.coverURL,
+                coverFallbackURLs: match.product.fallbackCoverURLs,
+                volumeNumber: match.volume,
+                volumeType: "audiobook",
+                sequenceIndex: offset,
+                bookType: "audiobook"
+            )
+        }
+        guard !books.isEmpty else { return nil }
+        return (requestedTitles.first ?? series.displayTitle, providerSeriesID, books)
+    }
+
+    static func appleBooksExactSelection(
+        from products: [SableAppleBooksCatalogClient.Product],
+        series: SableMangaBakaSeriesSummary,
+        fallbackProviderSeriesID: String
+    ) -> (
+        title: String,
+        providerSeriesID: String,
+        books: [SableLibraryBigBookCoversBookCandidate]
+    )? {
+        let requestedTitles = audibleRequestedTitles(
+            for: series,
+            fallback: series.displayTitle
+        )
+        if let matched = appleBooksSeriesSelection(
+            from: products,
+            requestedTitles: requestedTitles,
+            series: series,
+            query: series.displayTitle,
+            fallbackProviderSeriesID: fallbackProviderSeriesID
+        ) {
+            return matched
+        }
+
+        let books = products.enumerated().compactMap { offset, product ->
+            SableLibraryBigBookCoversBookCandidate? in
+            guard let coverURL = product.preferredCoverURL else { return nil }
+            let volumeNumber = explicitProviderVolumeNumber(
+                in: product.collectionName,
+                series: series,
+                language: "en"
+            ) ?? Double(offset + 1)
+            return SableLibraryBigBookCoversBookCandidate(
+                provider: .appleBooksUS,
+                id: String(product.collectionID),
+                seriesID: fallbackProviderSeriesID,
+                title: product.collectionName,
+                url: product.collectionViewURL
+                    ?? "https://books.apple.com/us/audiobook/id\(product.collectionID)",
+                coverURL: coverURL,
+                coverFallbackURLs: product.fallbackCoverURLs,
+                volumeNumber: volumeNumber,
+                volumeType: "audiobook",
+                sequenceIndex: offset,
+                bookType: "audiobook"
+            )
+        }
+        guard !books.isEmpty else { return nil }
+        return (series.displayTitle, fallbackProviderSeriesID, books)
     }
 
     static func audibleSeriesSelection(
@@ -8159,15 +8531,47 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         }
         candidateURLs.append(candidate.imageURL)
         candidateURLs.append(contentsOf: candidate.fallbackImageURLs)
-        let shouldCompareAllChoices =
-            amazonGalleryURL == nil
-                && !candidate.fallbackImageURLs.isEmpty
+        candidateURLs = SableLibraryCoverDownloadPlanner.uniqueNonEmpty(
+            candidateURLs
+        )
+        let shouldCompareAllChoices = candidateURLs.count > 1
+        var resolvedChoiceURLs: [String] = []
+        var inspectedMaximumURLs: [String: ValidatedStorefrontImage] = [:]
+        var failedMaximumURLs = Set<String>()
 
-        for rawURL in candidateURLs
-        where seenURLs.insert(rawURL).inserted {
-            guard let image = await downloadedStorefrontImage(from: rawURL) else {
+        for sourceURL in candidateURLs
+        where seenURLs.insert(sourceURL).inserted {
+            var bestSourceImage: ValidatedStorefrontImage?
+            let inspectedURLs = Self.usesLocalMaximumImageResolution(
+                for: sourceURL
+            )
+                ? Self.maximumImageURLCandidates(from: sourceURL)
+                : [sourceURL]
+            for maximumURL in inspectedURLs {
+                let image: ValidatedStorefrontImage
+                if let inspected = inspectedMaximumURLs[maximumURL] {
+                    image = inspected
+                } else {
+                    guard !failedMaximumURLs.contains(maximumURL),
+                          let downloaded = await downloadedStorefrontImageCandidate(
+                            from: maximumURL
+                          ) else {
+                        failedMaximumURLs.insert(maximumURL)
+                        continue
+                    }
+                    inspectedMaximumURLs[maximumURL] = downloaded
+                    image = downloaded
+                }
+                if image.width * image.height
+                    > (bestSourceImage?.width ?? 0)
+                        * (bestSourceImage?.height ?? 0) {
+                    bestSourceImage = image
+                }
+            }
+            guard let image = bestSourceImage else {
                 continue
             }
+            resolvedChoiceURLs.append(image.url)
             validatedDimensions[image.url] = (image.width, image.height)
             let hasAcceptedShape = Self.storefrontImageShapeIsAccepted(
                 width: image.width,
@@ -8204,12 +8608,27 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             accepted: bestBookImage,
             backCover: nil,
             imageChoices: Self.storefrontImageChoices(
-                from: candidateURLs,
+                from: resolvedChoiceURLs,
                 validatedDimensions: validatedDimensions
             ),
             bestRejectedWidth: bestRejectedDimensions?.width,
             bestRejectedHeight: bestRejectedDimensions?.height
         )
+    }
+
+    static func usesLocalMaximumImageResolution(for rawURL: String) -> Bool {
+        guard let host = URL(string: rawURL)?.host?.lowercased() else {
+            return false
+        }
+        return [
+            "mzstatic.com",
+            "yes24.com",
+            "kyobobook.co.kr",
+            "ridicdn.net",
+            "aladin.co.kr",
+            "kobo.com",
+            "shueisha.online"
+        ].contains { host == $0 || host.hasSuffix(".\($0)") }
     }
 
     static func storefrontImageShapeIsAccepted(
@@ -8558,7 +8977,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         var choices: [SableMangaBakaStorefrontImageChoice] = []
         var seen = Set<String>()
         for rawURL in rawURLs {
-            let url = archivalStorefrontImageURL(from: rawURL)
+            let url = rawURL
             let identity = SableMangaBakaCoverSnapshot.coverURLIdentity(url)
             guard !identity.isEmpty,
                   seen.insert(identity).inserted else {
@@ -8629,7 +9048,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 guard let image else { continue }
                 inspectionsByURL[rawURL] =
                     SableMangaBakaDirectCoverInspection(
-                        url: rawURL,
+                        url: image.url,
                         width: image.width,
                         height: image.height
                     )
@@ -8642,8 +9061,26 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
     private func downloadedStorefrontImage(
         from rawURL: String
     ) async -> ValidatedStorefrontImage? {
-        let archivalURL = Self.archivalStorefrontImageURL(from: rawURL)
-        guard let url = URL(string: archivalURL) else { return nil }
+        var best: ValidatedStorefrontImage?
+        for candidateURL in Self.maximumImageURLCandidates(from: rawURL) {
+            guard !Task.isCancelled else { break }
+            guard let image = await downloadedStorefrontImageCandidate(
+                from: candidateURL
+            ) else {
+                continue
+            }
+            if image.width * image.height
+                > (best?.width ?? 0) * (best?.height ?? 0) {
+                best = image
+            }
+        }
+        return best
+    }
+
+    private func downloadedStorefrontImageCandidate(
+        from rawURL: String
+    ) async -> ValidatedStorefrontImage? {
+        guard let url = URL(string: rawURL) else { return nil }
         var request = URLRequest(url: url)
         request.setValue(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -8669,7 +9106,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         }
         let validated = Self.validatedStorefrontImage(
             from: data,
-            archivalURL: archivalURL
+            archivalURL: rawURL
         )
         await Self.storefrontImageInspectionGate.release()
         return validated
@@ -8703,24 +9140,225 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
     }
 
     static func archivalStorefrontImageURL(from rawURL: String) -> String {
-        guard var components = URLComponents(string: rawURL),
-              components.host?.lowercased() == "cdn.kobo.com" else {
-            return rawURL
+        maximumImageURLCandidates(from: rawURL).first ?? rawURL
+    }
+
+    static func maximumImageURLCandidates(from rawURL: String) -> [String] {
+        guard let original = URLComponents(string: rawURL),
+              let host = original.host?.lowercased() else {
+            return [rawURL]
         }
-        var pathComponents = components.path.split(
-            separator: "/",
-            omittingEmptySubsequences: true
-        )
-        guard pathComponents.count >= 7,
-              pathComponents[0].lowercased() == "book-images",
-              Int(pathComponents[2]) != nil,
-              Int(pathComponents[3]) != nil else {
-            return rawURL
+        var candidates: [String] = []
+        var seen = Set<String>()
+        func append(_ value: String?) {
+            guard let value,
+                  !value.isEmpty,
+                  seen.insert(value).inserted else { return }
+            candidates.append(value)
         }
-        pathComponents[2] = "1200"
-        pathComponents[3] = "1936"
-        components.path = "/" + pathComponents.joined(separator: "/")
-        return components.url?.absoluteString ?? rawURL
+        func replacingPath(
+            _ components: URLComponents,
+            pattern: String,
+            replacement: String
+        ) -> String? {
+            var updated = components
+            updated.path = components.path.replacingOccurrences(
+                of: pattern,
+                with: replacement,
+                options: [.regularExpression, .caseInsensitive]
+            )
+            return updated.url?.absoluteString
+        }
+
+        if host.contains("media-amazon.com")
+            || host.contains("ssl-images-amazon.com") {
+            append(amazonOriginalImageURL(from: rawURL))
+        }
+
+        if host.hasSuffix("mzstatic.com"),
+           original.path.contains("/image/thumb/") {
+            var sized = original
+            var sizedParts = sized.path.split(
+                separator: "/",
+                omittingEmptySubsequences: false
+            )
+            if !sizedParts.isEmpty {
+                sizedParts[sizedParts.count - 1] = "10000x0w-999.jpg"
+                sized.path = sizedParts.joined(separator: "/")
+                append(sized.url?.absoluteString)
+            }
+        }
+
+        if host.hasSuffix("res.booklive.jp") {
+            append(replacingPath(
+                original,
+                pattern: #"(?i)/thumbnail/[^/.]+\.(jpe?g|png|webp)$"#,
+                replacement: "/thumbnail/X.$1"
+            ))
+        }
+
+        if host.hasSuffix("img.sos-dan.net") {
+            var updated = original
+            var parts = updated.path.split(
+                separator: "/",
+                omittingEmptySubsequences: true
+            )
+            if parts.count >= 2 {
+                parts[0] = "original"
+                let name = String(parts[parts.count - 1])
+                    .replacingOccurrences(
+                        of: #"\.(?:webp|jpe?g|png)$"#,
+                        with: "",
+                        options: [.regularExpression, .caseInsensitive]
+                    )
+                parts[parts.count - 1] = Substring(name)
+                updated.path = "/" + parts.joined(separator: "/")
+                append(updated.url?.absoluteString)
+            }
+        }
+
+        if host.hasSuffix("rimg.bookwalker.jp") {
+            var updated = original
+            let parts = updated.path.split(
+                separator: "/",
+                omittingEmptySubsequences: true
+            )
+            let recognizedThumbnailTokens = [
+                "BM2j7K0aiKyzud2kfkni6g__",
+                "eUnObgIVNjRTJtVUNQrbaQ__",
+                "OWWPXNVne2Og5o9nA6tp3Q__",
+                "WYSt3oZAsOZeWLNOG6XDcw__",
+                "UwdNlrHZZCAtX4RcoBwrFg__",
+                "frDGCemG5kX9EBY8IrbThQ__",
+                "Jja0QZS03nidtl5yTloDoQ__"
+            ]
+            if parts.count >= 2,
+               let key = parts.first,
+               recognizedThumbnailTokens.contains(where: {
+                   parts[1].hasPrefix($0)
+               }) {
+                updated.host = "c.bookwalker.jp"
+                let originalExtension = (original.path as NSString).pathExtension
+                let fileExtension = originalExtension.isEmpty
+                    ? "jpg"
+                    : originalExtension
+                updated.path = "/\(key)/t_700x780.\(fileExtension)"
+                append(updated.url?.absoluteString)
+            }
+        }
+
+        if host.hasSuffix("c.bookwalker.jp") {
+            let parts = original.path.split(
+                separator: "/",
+                omittingEmptySubsequences: true
+            )
+            if let numericKey = parts.first,
+               numericKey.allSatisfy(\.isNumber),
+               let reversed = Int(String(numericKey.reversed())) {
+                var updated = original
+                let originalExtension = (original.path as NSString).pathExtension
+                let fileExtension = originalExtension.isEmpty
+                    ? "jpg"
+                    : originalExtension
+                updated.path = "/coverImage_\(max(0, reversed - 1)).\(fileExtension)"
+                updated.query = nil
+                append(updated.url?.absoluteString)
+            }
+        }
+
+        if host.hasSuffix("image.yes24.com") {
+            append(replacingPath(
+                original,
+                pattern: #"(?i)(/goods/[0-9]+)(?:/[^/]+)?$"#,
+                replacement: "$1/"
+            ))
+            append(replacingPath(
+                original,
+                pattern: #"(?i)(/goods/[0-9]+)(?:/[^/]+)?$"#,
+                replacement: "$1/XL"
+            ))
+        }
+
+        if host == "mobile.kyobobook.co.kr",
+           let wrappedValue = original.queryItems?.first(where: {
+               $0.name.lowercased() == "url"
+           })?.value {
+            append(wrappedValue)
+        }
+        if host.hasSuffix("contents.kyobobook.co.kr") {
+            append(replacingPath(
+                original,
+                pattern: #"(?i)/sih/(?:fit-in/[^/]+/)?pdt/"#,
+                replacement: "/pdt/"
+            ))
+        }
+        if host.hasSuffix("image.kyobobook.co.kr") {
+            var updated = original
+            updated.path = updated.path.replacingOccurrences(
+                of: "/images/book/large/",
+                with: "/images/book/xlarge/",
+                options: .caseInsensitive
+            )
+            updated.path = updated.path.replacingOccurrences(
+                of: #"/l([0-9Xx]+\.(?:jpe?g|png))$"#,
+                with: "/x$1",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            append(updated.url?.absoluteString)
+        }
+
+        if host.hasSuffix("img.ridicdn.net") {
+            var updated = original
+            if let coverID = firstPathCapture(
+                in: updated.path,
+                pattern: #"(?i)^/cover/([^/]+)"#
+            ) {
+                updated.path = "/cover/\(coverID)/xxlarge"
+                updated.queryItems = [
+                    URLQueryItem(name: "dpi", value: "xxxhdpi"),
+                    URLQueryItem(name: "format", value: "png")
+                ]
+                append(updated.url?.absoluteString)
+            }
+        }
+
+        if host.hasSuffix("image.aladin.co.kr") {
+            var unqueried = original
+            unqueried.query = nil
+            append(unqueried.url?.absoluteString)
+            append(replacingPath(
+                unqueried,
+                pattern: #"(?i)/(?:coversum|cover100|cover150|covermini)/"#,
+                replacement: "/cover500/"
+            ))
+        }
+
+        if host.hasSuffix("cdn.kobo.com") {
+            var parts = original.path.split(
+                separator: "/",
+                omittingEmptySubsequences: true
+            )
+            if parts.count >= 7,
+               parts[0].lowercased() == "book-images",
+               Int(parts[2]) != nil,
+               Int(parts[3]) != nil {
+                var source = original
+                parts.removeSubrange(2...5)
+                source.path = "/" + parts.joined(separator: "/")
+                append(source.url?.absoluteString)
+            }
+        }
+
+        if host.hasSuffix("assets.shueisha.online") {
+            append(replacingPath(
+                original,
+                pattern: #"(?i)^/image/([^/]+(?:/[^/]+)*)/[0-9]+/([^/]+)$"#,
+                replacement: "/image/-/$1/0/$2"
+            ))
+        }
+
+        append(rawURL)
+        return candidates
     }
 
     private static func coverVisualSignature(from data: Data) -> [UInt8] {
@@ -9256,11 +9894,19 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 )
             }
             if provider == .bookWalkerJP || provider == .bookWalkerGlobal {
-                books = await booksWithStorefrontMediaProof(
-                    books,
-                    expectedMediaType: targetMediaType,
-                    sampleLimit: 2
-                )
+                if candidate.bookTypeWasExplicit,
+                   candidate.bookType?.lowercased().contains("audio") == true {
+                    for index in books.indices {
+                        books[index].bookType = "audiobook"
+                        books[index].volumeType = "audiobook"
+                    }
+                } else {
+                    books = await booksWithStorefrontMediaProof(
+                        books,
+                        expectedMediaType: targetMediaType,
+                        sampleLimit: 2
+                    )
+                }
             }
             guard !books.isEmpty else { return nil }
             return (candidate.title, candidate.id, books)
@@ -9413,6 +10059,32 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             )
         }
 
+        if reference.provider == .appleBooksUS {
+            guard reference.itemType == "book" else { return nil }
+            let products: [SableAppleBooksCatalogClient.Product]
+            if reference.itemID.count <= 11,
+               reference.itemID.allSatisfy(\.isNumber) {
+                products = try await appleBooksClient.lookup(
+                    collectionID: reference.itemID
+                )
+            } else {
+                let searched = try await appleBooksClient.search(
+                    query: series.displayTitle
+                )
+                let exactArtworkMatches = searched.filter {
+                    $0.artworkURL100?.contains(reference.itemID) == true
+                }
+                products = exactArtworkMatches.isEmpty
+                    ? searched
+                    : exactArtworkMatches
+            }
+            return Self.appleBooksExactSelection(
+                from: products,
+                series: series,
+                fallbackProviderSeriesID: reference.itemID
+            )
+        }
+
         if reference.provider == .yes24 {
             guard reference.itemType == "book",
                   let html = await Self.storefrontPageHTML(
@@ -9509,6 +10181,18 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             books,
             reference: reference
         )
+        if reference.provider == .bookWalkerGlobal {
+            let audiobookProof = await booksWithStorefrontMediaProof(
+                books,
+                expectedMediaType: "audiobook",
+                sampleLimit: 2
+            )
+            if audiobookProof.contains(where: {
+                $0.bookType?.lowercased().contains("audio") == true
+            }) {
+                books = audiobookProof
+            }
+        }
         if reference.provider.isAmazon,
            books.isEmpty,
            reference.itemType == "series" {
@@ -10068,13 +10752,16 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             proven[index].bookType = mediaType
         }
 
+        let normalizedExpected = SableLibraryCoverDownloadPlanner
+            .preferredProviderBookTypeForDownload(mediaType: expectedMediaType)
         let sampleTypes = Set(
             sampledProof
                 .compactMap(\.1)
-                .filter { $0 != "audiobook" }
+                .filter {
+                    normalizedExpected == "audiobook"
+                        || $0 != "audiobook"
+                }
         )
-        let normalizedExpected = SableLibraryCoverDownloadPlanner
-            .preferredProviderBookTypeForDownload(mediaType: expectedMediaType)
         let safeSeriesProof = sampleTypes.count == 1
             && sampleTypes.first == normalizedExpected
             ? sampleTypes.first

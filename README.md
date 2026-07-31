@@ -146,6 +146,10 @@ Chapter serial markers such as `分冊版`, `単話版`, `マイクロ版`, `単
 
 [Big Book Covers](https://covers.roler.dev/) is the primary provider-family and image source. Sable also uses exact store pages where they help prove media type, numbering, or a manually confirmed relationship.
 
+English novel scans can include audiobook companions from Audible, Apple Books, and BookWalker series that Big Book Covers explicitly identifies as audiobooks. Apple Books artwork is kept in JPEG form because its PNG variant can produce different colors.
+
+Big Book Covers image URLs are used as returned so normal scans stay quick. For locally discovered storefront images and directly pasted image links, Sable tries a small provider-specific set of plausible original-size URLs, downloads the readable candidates, measures their real dimensions, and silently keeps the largest valid image. The existing provider card and original URL remain the fallback; this does not add another review step or another visible image lane.
+
 Provider websites, APIs, HTML, anti-scraping controls, rate limits, and catalogs can change without a Sable update. A missing result does not prove that a publication does not exist. The manual series/book URL and direct cover-link tools remain available for that reason.
 
 Cover images and store metadata remain the property of their publishers, creators, retailers, and other rights holders. Users are responsible for following provider terms and the rules of the destination service.
@@ -170,10 +174,12 @@ Sable can interact with third-party services including:
 
 - [MangaBaka](https://mangabaka.org/data/api) for series metadata and contributor cover operations.
 - [Big Book Covers](https://covers.roler.dev/) for provider matching and cover discovery.
-- BookLive, BookWalker, Amazon, Audible, Barnes & Noble, YES24, Kyobo, RIDI, and other storefronts supported by the current provider code.
+- BookLive, BookWalker, Amazon, Audible, Apple Books, Barnes & Noble, YES24, Kyobo, RIDI, and other storefronts supported by the current provider code.
 - [RanobeDB](https://ranobedb.org/api/docs/v0), [AniList](https://anilist.gitbook.io/anilist-apiv2-docs), [Open Library](https://openlibrary.org/developers/api), Wikidata, TVmaze, TMDB, and TVDB for optional metadata evidence.
 
 Their availability, licensing, rate limits, and terms are independent of this project. Provider results are evidence for review, not guaranteed facts.
+
+The local original-size URL rules are informed by [Image Max URL](https://github.com/qsniyg/maxurl) by qsniyg, licensed under Apache-2.0. Sable uses a small native implementation for its supported cover providers; it does not bundle the browser userscript.
 
 ## Privacy and safety
 

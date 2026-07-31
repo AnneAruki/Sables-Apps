@@ -503,6 +503,7 @@ extension SableLibraryBigBookCoversProvider {
         case .yes24,
              .kyobo,
              .audibleUS,
+             .appleBooksUS,
              .rakutenKobo,
              .rakutenKoboNetherlands,
              .rakutenKoboJapan,

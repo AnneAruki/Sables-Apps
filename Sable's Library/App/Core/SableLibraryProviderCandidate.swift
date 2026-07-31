@@ -222,6 +222,7 @@ enum SableLibraryBigBookCoversProvider: String, Codable, Sendable, Equatable, Ca
     case amazon = "amz"
     case amazonUK = "amz-uk"
     case audibleUS = "audible-us"
+    case appleBooksUS = "local-apple-books-us"
     case amazonItaly = "amz-it"
     case amazonSpain = "amz-es"
     case amazonGermany = "amz-de"
@@ -258,7 +259,8 @@ enum SableLibraryBigBookCoversProvider: String, Codable, Sendable, Equatable, Ca
              .amazonNetherlands,
              .amazonFrance:
             .amazon
-        case .yes24,
+        case .appleBooksUS,
+             .yes24,
              .kyobo,
              .aladin,
              .ridibooks,
@@ -286,6 +288,7 @@ enum SableLibraryBigBookCoversProvider: String, Codable, Sendable, Equatable, Ca
         case .amazon: "Amazon US"
         case .amazonUK: "Amazon UK"
         case .audibleUS: "Audible"
+        case .appleBooksUS: "Apple Books"
         case .amazonItaly: "Amazon Italy"
         case .amazonSpain: "Amazon Spain"
         case .amazonGermany: "Amazon Germany"
@@ -321,6 +324,7 @@ enum SableLibraryBigBookCoversProvider: String, Codable, Sendable, Equatable, Ca
              .amazon,
              .amazonUK,
              .audibleUS,
+             .appleBooksUS,
              .rakutenKobo,
              .rakutenKoboUK,
              .barnesNobleUS,
@@ -355,25 +359,26 @@ enum SableLibraryBigBookCoversProvider: String, Codable, Sendable, Equatable, Ca
         case .amazonUK: 3
         case .shueisha: 4
         case .audibleUS: 5
-        case .yes24: 6
-        case .kyobo: 7
-        case .aladin: 8
-        case .ridibooks: 9
-        case .rakutenKoboJapan: 10
-        case .rakutenKobo: 11
-        case .rakutenKoboUK: 12
-        case .barnesNobleUS: 13
-        case .rakutenKoboNetherlands: 14
-        case .rakutenKoboFrance: 15
-        case .rakutenKoboGermany: 16
-        case .rakutenKoboItaly: 17
-        case .rakutenKoboSpain: 18
-        case .amazonFrance: 19
-        case .amazonGermany: 20
-        case .amazonItaly: 21
-        case .amazonSpain: 22
-        case .amazonNetherlands: 23
-        case .crunchyrollStore: 24
+        case .appleBooksUS: 6
+        case .yes24: 7
+        case .kyobo: 8
+        case .aladin: 9
+        case .ridibooks: 10
+        case .rakutenKoboJapan: 11
+        case .rakutenKobo: 12
+        case .rakutenKoboUK: 13
+        case .barnesNobleUS: 14
+        case .rakutenKoboNetherlands: 15
+        case .rakutenKoboFrance: 16
+        case .rakutenKoboGermany: 17
+        case .rakutenKoboItaly: 18
+        case .rakutenKoboSpain: 19
+        case .amazonFrance: 20
+        case .amazonGermany: 21
+        case .amazonItaly: 22
+        case .amazonSpain: 23
+        case .amazonNetherlands: 24
+        case .crunchyrollStore: 25
         }
     }
 
@@ -405,6 +410,7 @@ enum SableLibraryBigBookCoversProvider: String, Codable, Sendable, Equatable, Ca
              .bookWalkerJP,
              .bookWalkerGlobal,
              .audibleUS,
+             .appleBooksUS,
              .yes24,
              .kyobo,
              .aladin,

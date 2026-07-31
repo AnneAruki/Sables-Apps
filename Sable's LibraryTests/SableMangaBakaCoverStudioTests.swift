@@ -868,7 +868,7 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
     }
 
     @MainActor
-    func testExactExistingEditionReportsExactMatchInsteadOfQualityDenial() {
+    func testExactExistingEditionCanStillBecomeThePreferredDefault() {
         let store = SableMangaBakaCoverStudioStore()
         store.selectedSeries = SableMangaBakaSeriesSummary(
             id: 725,
@@ -898,10 +898,12 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         store.storefrontSuggestions = [digital]
         store.setStorefrontSuggestion(digital.id, isSelected: true)
 
-        XCTAssertEqual(store.stageSelectedStorefrontCovers(), 0)
+        XCTAssertEqual(store.stageSelectedStorefrontCovers(), 1)
+        XCTAssertEqual(store.draftImages.count, 1)
+        XCTAssertTrue(store.draftImages[0].isDefault)
         XCTAssertEqual(
             store.storefrontStageSummary,
-            "Every selected cover already exactly matches its target MangaBaka slot."
+            "1 selected cover already exactly matched its target slot. Updated the default cover using the preferred language and cover-type order."
         )
         XCTAssertFalse(
             store.status.lowercased().contains("equal or better")
@@ -4758,6 +4760,17 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                 thumbnailURL: nil
             )
         }
+        let audiobook = SableLibraryBigBookCoversSeriesCandidate(
+            provider: .bookWalkerGlobal,
+            id: "CNT_1QXEJ8JQDP0G",
+            title: "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+            url:
+                "https://bookwalker.com/series/1QXEJ8JQDP0G/is-it-wrong-to-try-to-pick-up-girls-in-a-dungeon",
+            type: "series",
+            bookType: "audiobook",
+            bookTypeWasExplicit: true,
+            thumbnailURL: nil
+        )
 
         let ranked = SableLibraryCoverDownloadPlanner
             .rankedSeriesCandidates(
@@ -4766,13 +4779,14 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                 mediaType: "manga"
             )
         let lanes = SableMangaBakaStorefrontDiscovery
-            .automaticSeriesCandidateLanes(ranked)
+            .automaticSeriesCandidateLanes(ranked + [audiobook])
 
         XCTAssertEqual(lanes.volumes.map(\.id), ["20144150"])
         XCTAssertEqual(
             Set(lanes.chapters.map(\.id)),
             Set(chapterSerials.map(\.id))
         )
+        XCTAssertEqual(lanes.audiobooks.map(\.id), ["CNT_1QXEJ8JQDP0G"])
     }
 
     func testCompatibleBBCTypeCannotAutoOpenAnUnrelatedSeriesTitle() {
@@ -7043,7 +7057,7 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
     }
 
-    func testAudibleCompanionDiscoveryOnlyRunsForNovelSeries() {
+    func testAudiobookCompanionDiscoveryOnlyRunsForNovelSeries() {
         let novel = SableMangaBakaSeriesSummary(
             id: 1,
             title: "Kuma Kuma Kuma Bear",
@@ -7079,11 +7093,18 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                     provider: .amazon
                 )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             SableMangaBakaStorefrontDiscovery
                 .shouldDiscoverEnglishAudiobooks(
                     for: novel,
                     provider: .bookWalkerGlobal
+                )
+        )
+        XCTAssertTrue(
+            SableMangaBakaStorefrontDiscovery
+                .shouldDiscoverEnglishAudiobooks(
+                    for: novel,
+                    provider: .appleBooksUS
                 )
         )
         XCTAssertFalse(
@@ -7091,6 +7112,13 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                 .shouldDiscoverEnglishAudiobooks(
                     for: manga,
                     provider: .audibleUS
+                )
+        )
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .shouldDiscoverEnglishAudiobooks(
+                    for: manga,
+                    provider: .appleBooksUS
                 )
         )
     }
@@ -7145,6 +7173,46 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(products.first?.series?.first?.asin, "B0F7Z67917")
     }
 
+    func testAppleBooksCatalogUsesLargeJPEGArtworkOnly() throws {
+        let data = Data(
+            """
+            {
+              "resultCount": 1,
+              "results": [
+                {
+                  "wrapperType": "audiobook",
+                  "collectionId": 1697529670,
+                  "artistName": "Fujino Omori",
+                  "collectionName": "Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1",
+                  "collectionViewUrl": "https://books.apple.com/us/audiobook/id1697529670",
+                  "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/example/9781975388171.jpg/100x100bb.jpg"
+                }
+              ]
+            }
+            """.utf8
+        )
+
+        let products = try SableAppleBooksCatalogClient.products(from: data)
+        let product = try XCTUnwrap(products.first)
+
+        XCTAssertEqual(product.collectionID, 1_697_529_670)
+        XCTAssertEqual(
+            product.preferredCoverURL,
+            "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/example/9781975388171.jpg/10000x0w-999.jpg"
+        )
+        XCTAssertEqual(
+            product.fallbackCoverURLs,
+            [
+                "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/example/9781975388171.jpg/100x100bb.jpg"
+            ]
+        )
+        XCTAssertFalse(
+            ([product.preferredCoverURL] + product.fallbackCoverURLs)
+                .compactMap { $0 }
+                .contains { $0.lowercased().hasSuffix(".png") }
+        )
+    }
+
     func testAudibleProductURLParsesAsExactBookReference() {
         let reference = SableMangaBakaStorefrontDiscovery
             .storeSeriesReference(
@@ -7157,6 +7225,26 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(reference?.itemType, "book")
         XCTAssertEqual(reference?.languageOverride, "en")
         XCTAssertEqual(reference?.publisherProvenMediaType, "audiobook")
+    }
+
+    func testAppleBooksAudiobookURLsParseAsExactReferences() {
+        let canonical = SableMangaBakaStorefrontDiscovery
+            .storeSeriesReference(
+                from:
+                    "https://books.apple.com/us/audiobook/is-it-wrong-to-try-to-pick-up-girls/id1697529670"
+            )
+        let legacyISBN = SableMangaBakaStorefrontDiscovery
+            .storeSeriesReference(
+                from:
+                    "https://books.apple.com/us/audiobook/Is It Wrong to Try to Pick Up Girls in a Dungeon?, Vol. 1/9781975388171"
+            )
+
+        XCTAssertEqual(canonical?.provider, .appleBooksUS)
+        XCTAssertEqual(canonical?.itemID, "1697529670")
+        XCTAssertEqual(canonical?.publisherProvenMediaType, "audiobook")
+        XCTAssertEqual(legacyISBN?.provider, .appleBooksUS)
+        XCTAssertEqual(legacyISBN?.itemID, "9781975388171")
+        XCTAssertEqual(legacyISBN?.publisherProvenMediaType, "audiobook")
     }
 
     func testAudibleSelectionKeepsTitleMatchedProductWithoutSeriesMetadata() {
@@ -8031,7 +8119,13 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                 for: ["en"],
                 mediaType: "novel"
             ),
-            [.bookWalkerGlobal, .amazon, .amazonUK, .audibleUS]
+            [
+                .bookWalkerGlobal,
+                .amazon,
+                .amazonUK,
+                .audibleUS,
+                .appleBooksUS
+            ]
         )
         XCTAssertEqual(
             SableMangaBakaStorefrontDiscovery.recommendedProviders(
@@ -8096,7 +8190,8 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                 .bookWalkerGlobal,
                 .amazon,
                 .amazonUK,
-                .audibleUS
+                .audibleUS,
+                .appleBooksUS
             ]
         )
         XCTAssertEqual(
@@ -8118,6 +8213,7 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                 .amazonUK,
                 .shueisha,
                 .audibleUS,
+                .appleBooksUS,
                 .yes24,
                 .kyobo,
                 .aladin,
@@ -8194,6 +8290,7 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                 .amazon,
                 .amazonUK,
                 .audibleUS,
+                .appleBooksUS,
                 .barnesNobleUS
             ]
         )
@@ -8737,7 +8834,7 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertNil(product)
     }
 
-    func testKoboCDNURLRequestsArchiveSizedArtwork() {
+    func testKoboCDNURLRequestsTheUnconstrainedArtwork() {
         let source =
             "https://cdn.kobo.com/book-images/"
             + "014a0a77-326d-4ba1-9860-12ae3d6f0d03/"
@@ -8750,7 +8847,87 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
             upgraded,
             "https://cdn.kobo.com/book-images/"
                 + "014a0a77-326d-4ba1-9860-12ae3d6f0d03/"
-                + "1200/1936/90/False/example-volume-1.jpg"
+                + "example-volume-1.jpg"
+        )
+    }
+
+    func testMaximumImageCandidatesUseLocalSourcesWithoutChangingBBCImages() {
+        let bbcBookLive = "https://c.roler.dev/bl/965497-001/0"
+        let bbcBookWalker = "https://c.roler.dev/bw/303953-1/0"
+        let bbcAmazon = "https://c.roler.dev/amz/B09RN5QP4G/0"
+        let apple =
+            "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/example/9781975388171.jpg/100x100bb.jpg"
+
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .usesLocalMaximumImageResolution(for: bbcBookLive)
+        )
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .usesLocalMaximumImageResolution(for: bbcBookWalker)
+        )
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .usesLocalMaximumImageResolution(for: bbcAmazon)
+        )
+        XCTAssertTrue(
+            SableMangaBakaStorefrontDiscovery
+                .usesLocalMaximumImageResolution(for: apple)
+        )
+
+        let appleCandidates = SableMangaBakaStorefrontDiscovery
+            .maximumImageURLCandidates(from: apple)
+        XCTAssertEqual(
+            appleCandidates.first,
+            "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/example/9781975388171.jpg/10000x0w-999.jpg"
+        )
+        XCTAssertEqual(appleCandidates.last, apple)
+        XCTAssertFalse(
+            appleCandidates.contains { $0.lowercased().hasSuffix(".png") }
+        )
+    }
+
+    func testMaximumImageCandidatesCoverLocalStorefrontRules() {
+        let yes24 = SableMangaBakaStorefrontDiscovery
+            .maximumImageURLCandidates(
+                from: "https://image.yes24.com/goods/180386493/L"
+            )
+        let kyobo = SableMangaBakaStorefrontDiscovery
+            .maximumImageURLCandidates(
+                from:
+                    "https://contents.kyobobook.co.kr/sih/fit-in/3000x0/pdt/9791172884338.jpg"
+            )
+        let ridi = SableMangaBakaStorefrontDiscovery
+            .maximumImageURLCandidates(
+                from: "https://img.ridicdn.net/cover/2066007610/xlarge"
+            )
+        let aladin = SableMangaBakaStorefrontDiscovery
+            .maximumImageURLCandidates(
+                from:
+                    "https://image.aladin.co.kr/product/123/45/coversum/example.jpg?RS=384"
+            )
+        let shueisha = SableMangaBakaStorefrontDiscovery
+            .maximumImageURLCandidates(
+                from:
+                    "https://assets.shueisha.online/image/upload/600/example.jpg"
+            )
+
+        XCTAssertTrue(yes24.contains("https://image.yes24.com/goods/180386493/XL"))
+        XCTAssertTrue(kyobo.contains("https://contents.kyobobook.co.kr/pdt/9791172884338.jpg"))
+        XCTAssertTrue(
+            ridi.contains(
+                "https://img.ridicdn.net/cover/2066007610/xxlarge?dpi=xxxhdpi&format=png"
+            )
+        )
+        XCTAssertTrue(
+            aladin.contains(
+                "https://image.aladin.co.kr/product/123/45/cover500/example.jpg"
+            )
+        )
+        XCTAssertTrue(
+            shueisha.contains(
+                "https://assets.shueisha.online/image/-/upload/0/example.jpg"
+            )
         )
     }
 
@@ -9505,6 +9682,9 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
         XCTAssertNil(
             SableLibraryBigBookCoversProvider.audibleUS.rolerProviderID
+        )
+        XCTAssertNil(
+            SableLibraryBigBookCoversProvider.appleBooksUS.rolerProviderID
         )
         XCTAssertEqual(
             SableLibraryBigBookCoversProvider.shueisha.rolerProviderID,
