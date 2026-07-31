@@ -246,7 +246,11 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     @Published var status = "Search MangaBaka or paste a series URL."
     @Published var errorMessage: String?
     @Published var isWorking = false
-    @Published private(set) var hasContributorToken = false
+    @Published private(set) var hasMangaBakaToken = false
+    @Published private(set) var mangaBakaAccountRole:
+        SableMangaBakaAccountRole?
+    @Published private(set) var isCheckingMangaBakaAccount = false
+    @Published private(set) var mangaBakaAccountMessage: String?
     @Published var isDownloading = false
     @Published var downloadResult: SableMangaBakaDownloadResult?
     @Published var libraryAuditItems: [SableMangaBakaLibraryCoverAuditItem] = []
@@ -307,7 +311,8 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         SableStorefrontRelationshipApprovalStore
     private var snapshotVersion: Int64?
     private var baselineImages: [SableMangaBakaCoverImage] = []
-    private var contributorTokenCache = ""
+    private var mangaBakaTokenCache = ""
+    private var mangaBakaAccountLookupGeneration = UUID()
     private var storefrontScanClock: Task<Void, Never>?
     private var storefrontScanTask: Task<Void, Never>?
     private var storefrontScanStopFallback: Task<Void, Never>?
@@ -334,8 +339,8 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         let token = settings.loadProviderCredentials()
             .mangaBakaPersonalAccessToken
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        contributorTokenCache = token
-        hasContributorToken = !token.isEmpty
+        mangaBakaTokenCache = token
+        hasMangaBakaToken = !token.isEmpty
     }
 
     var selectedLibraryURL: URL? {
@@ -427,13 +432,59 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             : "Search MangaBaka or paste a series URL."
     }
 
-    func refreshContributorToken() {
+    func refreshMangaBakaAccount() {
         let token = settings.loadProviderCredentials()
             .mangaBakaPersonalAccessToken
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard token != contributorTokenCache else { return }
-        contributorTokenCache = token
-        hasContributorToken = !token.isEmpty
+        let tokenChanged = token != mangaBakaTokenCache
+        if tokenChanged {
+            mangaBakaTokenCache = token
+            mangaBakaAccountRole = nil
+            mangaBakaAccountMessage = nil
+            mangaBakaAccountLookupGeneration = UUID()
+        }
+        hasMangaBakaToken = !token.isEmpty
+        guard !token.isEmpty else {
+            isCheckingMangaBakaAccount = false
+            mangaBakaAccountMessage = nil
+            return
+        }
+        guard tokenChanged || mangaBakaAccountRole == nil else { return }
+        guard !isCheckingMangaBakaAccount else { return }
+
+        let generation = UUID()
+        mangaBakaAccountLookupGeneration = generation
+        isCheckingMangaBakaAccount = true
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let profile = try await client.accountProfile(token: token)
+                guard mangaBakaAccountLookupGeneration == generation,
+                      mangaBakaTokenCache == token else {
+                    return
+                }
+                mangaBakaAccountRole = profile.role
+                mangaBakaAccountMessage = nil
+                isCheckingMangaBakaAccount = false
+            } catch {
+                guard mangaBakaAccountLookupGeneration == generation,
+                      mangaBakaTokenCache == token else {
+                    return
+                }
+                mangaBakaAccountRole = nil
+                mangaBakaAccountMessage =
+                    "Sable could not verify this MangaBaka account yet. Cover changes will use the review queue."
+                isCheckingMangaBakaAccount = false
+            }
+        }
+    }
+
+    var preferredSaveMode: SableMangaBakaSaveMode {
+        mangaBakaAccountRole?.submissionMode ?? .review
+    }
+
+    var canApplyDirectly: Bool {
+        preferredSaveMode == .direct
     }
 
     var filteredLibraryAuditItems: [SableMangaBakaLibraryCoverAuditItem] {
@@ -472,7 +523,8 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     var canSubmit: Bool {
         selectedSeries != nil
             && snapshotVersion != nil
-            && hasContributorToken
+            && hasMangaBakaToken
+            && !isCheckingMangaBakaAccount
             && validationIssues.isEmpty
             && !isWorking
             && hasDraftChanges
@@ -993,7 +1045,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         do {
             let inventory = try await client.coverInventory(
                 seriesID: series.id,
-                token: contributorToken
+                token: mangaBakaToken
             )
             let snapshot = inventory.snapshot
             mangaBakaLiveCovers = inventory.liveImages
@@ -2100,7 +2152,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             volumeNumber: suggestion.volumeNumber
         )
         rolerBookCorrectionStatuses[statusID] = .localOnly(
-            "The corrected number will sync after MangaBaka accepts your direct apply."
+            "The corrected number will sync after MangaBaka accepts the cover submission request."
         )
     }
 
@@ -2593,7 +2645,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         )
     }
 
-    private func syncRolerAfterSuccessfulUpload(
+    private func syncRolerAfterSuccessfulSubmission(
         _ plan: SableRolerUploadSyncPlan
     ) async -> String? {
         let groups = plan.groups
@@ -3203,7 +3255,8 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             submissionNote += submissionNote.isEmpty ? "" : " "
             submissionNote += "Updated the default cover using the preferred language and cover-type order."
         }
-        status = "\(storefrontStageSummary ?? "") Confirm direct apply when you are ready."
+        let action = canApplyDirectly ? "direct apply" : "review submission"
+        status = "\(storefrontStageSummary ?? "") Confirm the \(action) when you are ready."
         return changedCount
     }
 
@@ -3266,7 +3319,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             }
     }
 
-    func prepareStorefrontDirectApply() -> Bool {
+    func prepareStorefrontSubmission() -> Bool {
         if !selectedStorefrontSuggestionIDs.isEmpty {
             _ = stageSelectedStorefrontCovers()
         }
@@ -3281,8 +3334,12 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         if submissionNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             submissionNote = "Updated the cover set for \(selectedSeries.displayTitle). Checked media type, language, volume order, and source URLs."
         }
-        guard hasContributorToken else {
-            errorMessage = "Add your MangaBaka contributor token in Settings before applying covers."
+        guard hasMangaBakaToken else {
+            errorMessage = "Add your MangaBaka personal access token in Settings before submitting covers."
+            return false
+        }
+        guard !isCheckingMangaBakaAccount else {
+            errorMessage = "Sable is checking this MangaBaka account's permissions. Try again in a moment."
             return false
         }
         guard validationIssues.isEmpty else {
@@ -3375,7 +3432,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             }
         }
         let unavailableCount = max(added - measuredCount, 0)
-        status = "Added \(added) cover link\(added == 1 ? "" : "s") to the proposed MangaBaka set\(skipped > 0 ? "; \(skipped) duplicate or invalid link\(skipped == 1 ? "" : "s") skipped" : "")\(unavailableCount > 0 ? "; size unavailable for \(unavailableCount)" : ""). Review the cards, then confirm direct apply when ready."
+        status = "Added \(added) cover link\(added == 1 ? "" : "s") to the proposed MangaBaka set\(skipped > 0 ? "; \(skipped) duplicate or invalid link\(skipped == 1 ? "" : "s") skipped" : "")\(unavailableCount > 0 ? "; size unavailable for \(unavailableCount)" : ""). Review the cards, then confirm the MangaBaka submission when ready."
     }
 
     func pasteCoverURLs() {
@@ -3511,15 +3568,13 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
                     snapshot: snapshot,
                     note: submissionNote,
                     mode: mode,
-                    token: contributorToken
+                    token: mangaBakaToken
                 )
                 let submissionStatus = mode == .review
                     ? "Submission \(result.submissionID) is \(result.status)."
                     : "Direct change \(result.submissionID) is \(result.status)."
                 preview = nil
-                let rolerPlan = mode == .direct
-                    ? rolerUploadSyncPlan()
-                    : nil
+                let rolerPlan = rolerUploadSyncPlan()
                 if rolerPlan != nil {
                     stagedStorefrontMappingSuggestionIDs = []
                 }
@@ -3539,7 +3594,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
                     Task { [weak self] in
                         guard let self else { return }
                         let rolerStatus =
-                            await self.syncRolerAfterSuccessfulUpload(
+                            await self.syncRolerAfterSuccessfulSubmission(
                                 rolerPlan
                             )
                         guard self.status == pendingStatus else { return }
@@ -3582,8 +3637,8 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         .normalizedForSubmission()
     }
 
-    private var contributorToken: String {
-        contributorTokenCache
+    private var mangaBakaToken: String {
+        mangaBakaTokenCache
     }
 
     private func auditBrowseResults(
@@ -4319,7 +4374,7 @@ private struct SableMangaBakaCoverNumberEditor: View {
 struct SableMangaBakaCoverStudioView: View {
     @Environment(\.sableLibraryPalette) private var palette
     @StateObject private var store = SableMangaBakaCoverStudioStore()
-    @State private var showDirectApplyConfirmation = false
+    @State private var showMangaBakaSubmissionConfirmation = false
     @State private var showStoreSeriesURLs = false
     @State private var showManualURLFallback = false
     @State private var showStorefrontNotes = false
@@ -4349,15 +4404,23 @@ struct SableMangaBakaCoverStudioView: View {
                 .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
         }
         .confirmationDialog(
-            "Apply directly to MangaBaka?",
-            isPresented: $showDirectApplyConfirmation
+            store.canApplyDirectly
+                ? "Apply directly to MangaBaka?"
+                : "Submit these changes for review?",
+            isPresented: $showMangaBakaSubmissionConfirmation
         ) {
-            Button("Apply Directly", role: .destructive) {
-                store.submit(mode: .direct)
+            if store.canApplyDirectly {
+                Button("Apply Directly", role: .destructive) {
+                    store.submit(mode: .direct)
+                }
+            } else {
+                Button("Submit for Review") {
+                    store.submit(mode: .review)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This bypasses the review queue using your contributor permission. Sable will apply the proposed cover set with this comment:\n\n\(store.submissionNote)")
+            Text(mangaBakaSubmissionConfirmationMessage)
         }
         .confirmationDialog(
             "Cover content rating",
@@ -4394,7 +4457,7 @@ struct SableMangaBakaCoverStudioView: View {
             storefrontScanDetailsSheet
         }
         .onAppear {
-            store.refreshContributorToken()
+            store.refreshMangaBakaAccount()
         }
         .onChange(of: store.selectedSeries?.id) { _, _ in
             showCurrentCoverSet = false
@@ -4436,7 +4499,7 @@ struct SableMangaBakaCoverStudioView: View {
                 for: NSApplication.didBecomeActiveNotification
             )
         ) { _ in
-            store.refreshContributorToken()
+            store.refreshMangaBakaAccount()
         }
     }
 
@@ -6961,19 +7024,19 @@ struct SableMangaBakaCoverStudioView: View {
         .sableCoverDataSurface(fill: palette.surface, border: palette.border)
     }
 
-    private var storefrontDirectApplyControls: some View {
+    private var storefrontSubmissionControls: some View {
         let selectedCount =
             store.selectedMangaBakaStorefrontSuggestions.count
         return ViewThatFits(in: .horizontal) {
             HStack(alignment: .center, spacing: 14) {
-                storefrontDirectApplySummary(selectedCount: selectedCount)
+                storefrontSubmissionSummary(selectedCount: selectedCount)
                 Spacer(minLength: 12)
-                storefrontDirectApplyButton(selectedCount: selectedCount)
+                storefrontSubmissionButton(selectedCount: selectedCount)
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                storefrontDirectApplySummary(selectedCount: selectedCount)
-                storefrontDirectApplyButton(selectedCount: selectedCount)
+                storefrontSubmissionSummary(selectedCount: selectedCount)
+                storefrontSubmissionButton(selectedCount: selectedCount)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
@@ -6983,7 +7046,7 @@ struct SableMangaBakaCoverStudioView: View {
     }
 
     private var storefrontPinnedApplyBar: some View {
-        storefrontDirectApplyControls
+        storefrontSubmissionControls
             .frame(maxWidth: 1180)
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
@@ -6994,7 +7057,7 @@ struct SableMangaBakaCoverStudioView: View {
             }
     }
 
-    private func storefrontDirectApplySummary(selectedCount: Int) -> some View {
+    private func storefrontSubmissionSummary(selectedCount: Int) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Label(
                 selectedCount > 0
@@ -7006,27 +7069,21 @@ struct SableMangaBakaCoverStudioView: View {
             )
             .font(.callout.weight(.semibold))
 
-            Text(
-                store.hasContributorToken
-                    ? "Sable writes a source-and-volume comment automatically. You will confirm once before anything is sent."
-                    : "Add your MangaBaka contributor token in Settings before applying covers."
-            )
+            Text(mangaBakaSubmissionAccessText)
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func storefrontDirectApplyButton(selectedCount: Int) -> some View {
+    private func storefrontSubmissionButton(selectedCount: Int) -> some View {
         Button {
-            if store.prepareStorefrontDirectApply() {
-                showDirectApplyConfirmation = true
+            if store.prepareStorefrontSubmission() {
+                showMangaBakaSubmissionConfirmation = true
             }
         } label: {
             Label(
-                selectedCount > 0
-                    ? "Apply \(selectedCount) Selected Directly..."
-                    : "Apply Prepared Changes...",
+                mangaBakaSubmissionButtonTitle(selectedCount: selectedCount),
                 systemImage: "paperplane.fill"
             )
         }
@@ -7034,10 +7091,50 @@ struct SableMangaBakaCoverStudioView: View {
         .controlSize(.large)
         .disabled(
             store.isWorking
+                || store.isCheckingMangaBakaAccount
                 || (selectedCount == 0 && !store.hasDraftChanges)
         )
-        .help("Prepare the selected covers and confirm a direct MangaBaka update.")
+        .help(
+            store.canApplyDirectly
+                ? "Prepare the selected covers and confirm a direct MangaBaka update."
+                : "Prepare the selected covers and send them to MangaBaka for review."
+        )
         .accessibilityHint("A confirmation shows Sable's change comment before anything is sent.")
+    }
+
+    private var mangaBakaSubmissionAccessText: String {
+        guard store.hasMangaBakaToken else {
+            return "Add your MangaBaka personal access token in Settings before submitting covers."
+        }
+        if store.isCheckingMangaBakaAccount {
+            return "Checking whether this MangaBaka account can apply directly or needs review."
+        }
+        if let role = store.mangaBakaAccountRole {
+            if role.canApplyDirectly {
+                return "\(role.displayName) access: Sable can apply directly after one confirmation."
+            }
+            return "\(role.displayName) access: Sable will send these changes to MangaBaka for review."
+        }
+        return store.mangaBakaAccountMessage
+            ?? "Sable will use MangaBaka's review queue for this account."
+    }
+
+    private var mangaBakaSubmissionConfirmationMessage: String {
+        let action = store.canApplyDirectly
+            ? "This account can bypass the review queue."
+            : "MangaBaka will place these changes in its review queue."
+        return "\(action) After MangaBaka receives the request, Sable will also sync confirmed mappings to Roler.\n\nComment:\n\(store.submissionNote)"
+    }
+
+    private func mangaBakaSubmissionButtonTitle(
+        selectedCount: Int
+    ) -> String {
+        let subject = selectedCount > 0
+            ? "\(selectedCount) Selected"
+            : "Prepared Changes"
+        return store.canApplyDirectly
+            ? "Apply \(subject) Directly..."
+            : "Submit \(subject) for Review..."
     }
 
     private func storefrontSuggestionRow(
@@ -7425,7 +7522,7 @@ struct SableMangaBakaCoverStudioView: View {
                 }
             }
 
-            if !store.hasContributorToken {
+            if !store.hasMangaBakaToken {
                 SettingsLink {
                     Label("Open MangaBaka Settings", systemImage: "gearshape")
                 }

@@ -1150,6 +1150,79 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
     }
 
+    func testOnlyContributorModeratorAndAdminCanApplyDirectly() {
+        XCTAssertFalse(SableMangaBakaAccountRole.user.canApplyDirectly)
+        XCTAssertFalse(SableMangaBakaAccountRole.developer.canApplyDirectly)
+        XCTAssertTrue(SableMangaBakaAccountRole.contributor.canApplyDirectly)
+        XCTAssertTrue(SableMangaBakaAccountRole.moderator.canApplyDirectly)
+        XCTAssertTrue(SableMangaBakaAccountRole.admin.canApplyDirectly)
+
+        XCTAssertEqual(SableMangaBakaAccountRole.user.submissionMode, .review)
+        XCTAssertEqual(
+            SableMangaBakaAccountRole.developer.submissionMode,
+            .review
+        )
+        XCTAssertEqual(
+            SableMangaBakaAccountRole.contributor.submissionMode,
+            .direct
+        )
+        XCTAssertEqual(
+            SableMangaBakaAccountRole.moderator.submissionMode,
+            .direct
+        )
+        XCTAssertEqual(SableMangaBakaAccountRole.admin.submissionMode, .direct)
+    }
+
+    func testAccountProfileChoosesReviewForUserAndDirectForContributor()
+        async throws
+    {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SableMangaBakaURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        var returnedRole = SableMangaBakaAccountRole.user
+        SableMangaBakaURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/my/profile")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "x-api-key"),
+                "mb-test-token"
+            )
+
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+            )
+            let data = Data(
+                """
+                {"status":200,"data":{"id":"account-1","preferred_username":"Sable","updated_at":null,"role":"\(returnedRole.rawValue)","auth_type":"pat","scopes":[]}}
+                """.utf8
+            )
+            return (response, data)
+        }
+
+        let client = SableMangaBakaCoverClient(session: session)
+        let userProfile = try await client
+            .accountProfile(token: "mb-test-token")
+
+        XCTAssertEqual(userProfile.id, "account-1")
+        XCTAssertEqual(userProfile.preferredUsername, "Sable")
+        XCTAssertEqual(userProfile.role, .user)
+        XCTAssertEqual(userProfile.role.submissionMode, .review)
+
+        returnedRole = .contributor
+        let contributorProfile = try await client
+            .accountProfile(token: "mb-test-token")
+
+        XCTAssertEqual(contributorProfile.role, .contributor)
+        XCTAssertEqual(contributorProfile.role.submissionMode, .direct)
+    }
+
     func testSubmitExplicitlyUsesReviewQueueAndPersonalAccessToken() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SableMangaBakaURLProtocol.self]

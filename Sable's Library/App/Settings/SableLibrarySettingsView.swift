@@ -673,7 +673,7 @@ struct SableLibrarySettingsView: View {
                 systemImage: "photo.badge.checkmark"
             )
             SableLibraryInfoBanner(
-                text: "MangaBaka Studio always previews the exact public database change first. Review queue is the default; direct apply requires a separate explicit confirmation.",
+                text: "MangaBaka Studio previews the exact database change first. User and developer accounts submit for review; contributor, moderator, and admin accounts can apply directly after a separate confirmation.",
                 role: .warning,
                 systemImage: "person.badge.shield.checkmark"
             )
@@ -766,7 +766,7 @@ struct SableLibrarySettingsView: View {
                     if mode == .covers {
                         providerCredentialField(
                             title: "MangaBaka personal access token",
-                            detail: "Used only by MangaBaka Studio to load contributor snapshots, preview cover changes, and submit them. Personal tokens begin with mb-.",
+                            detail: "Used only by MangaBaka Studio to load editable cover snapshots, preview changes, and either submit for review or apply directly when the account has permission. Personal tokens begin with mb-.",
                             text: $providerCredentials.mangaBakaPersonalAccessToken
                         )
 

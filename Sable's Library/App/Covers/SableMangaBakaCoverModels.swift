@@ -1246,6 +1246,54 @@ nonisolated enum SableMangaBakaSaveMode: String, Sendable {
     case direct
 }
 
+nonisolated enum SableMangaBakaAccountRole: String, Codable, Sendable, Equatable {
+    case user
+    case developer
+    case contributor
+    case moderator
+    case admin
+
+    var canApplyDirectly: Bool {
+        switch self {
+        case .contributor, .moderator, .admin:
+            true
+        case .user, .developer:
+            false
+        }
+    }
+
+    var submissionMode: SableMangaBakaSaveMode {
+        canApplyDirectly ? .direct : .review
+    }
+
+    var displayName: String {
+        switch self {
+        case .user:
+            "User"
+        case .developer:
+            "Developer"
+        case .contributor:
+            "Contributor"
+        case .moderator:
+            "Moderator"
+        case .admin:
+            "Admin"
+        }
+    }
+}
+
+nonisolated struct SableMangaBakaAccountProfile: Decodable, Sendable, Equatable {
+    var id: String
+    var role: SableMangaBakaAccountRole
+    var preferredUsername: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case role
+        case preferredUsername = "preferred_username"
+    }
+}
+
 nonisolated struct SableMangaBakaDownloadResult: Sendable, Equatable {
     var saved: [String]
     var skipped: [String]

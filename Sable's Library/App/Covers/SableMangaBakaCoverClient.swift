@@ -265,6 +265,20 @@ actor SableMangaBakaCoverClient {
         try await coverInventory(seriesID: seriesID, token: token).snapshot
     }
 
+    func accountProfile(
+        token: String
+    ) async throws -> SableMangaBakaAccountProfile {
+        let trimmedToken = try validatedToken(token)
+        let url = apiBaseURL.appendingPathComponent("v1/my/profile")
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        let response: ProfileEnvelope = try await send(
+            request,
+            token: trimmedToken
+        )
+        return response.data
+    }
+
     func coverInventory(
         seriesID: Int,
         token: String
@@ -10482,6 +10496,10 @@ private extension SableMangaBakaCoverClient {
 
     struct SeriesEnvelope: Decodable {
         var data: SableMangaBakaSeriesSummary
+    }
+
+    struct ProfileEnvelope: Decodable {
+        var data: SableMangaBakaAccountProfile
     }
 
     struct PublicImagesEnvelope: Decodable {

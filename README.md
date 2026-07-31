@@ -137,8 +137,8 @@ The main workflow is:
 5. Compare each best candidate with MangaBaka's current image dimensions and content rating.
 6. Keep the suggested primary image, choose another provider, or include additional editions in the same slot.
 7. Add an optional note, correct a number or rating, and stage only the missing or better covers.
-8. Review the generated contributor comment and confirmation before applying.
-9. Share confirmed mappings and number corrections back to Roler when signed in.
+8. Review the generated comment and confirmation before submitting for review or applying directly, according to the MangaBaka account role.
+9. Share confirmed mappings and number corrections back to Roler after either MangaBaka action when signed in.
 
 Chapter serial markers such as `分冊版`, `単話版`, `マイクロ版`, `単話売り`, `ばら売り`, and `連載版` are treated as chapter evidence. Repeated chapter artwork is reduced to the earliest useful chapter because MangaBaka does not need every repeated copy.
 
@@ -156,7 +156,7 @@ The repository ships with **no production credentials**.
 
 Optional credentials are entered by each user in app Settings and stored in the macOS Keychain:
 
-- **MangaBaka personal access token** for contributor snapshots, preview, and apply.
+- **MangaBaka personal access token** for editable snapshots, previews, review submissions, and role-permitted direct changes.
 - **Roler sign-in** for confirmed series mappings and volume-number corrections.
 - **TMDB and TVDB credentials** for optional metadata work outside Covers.
 
