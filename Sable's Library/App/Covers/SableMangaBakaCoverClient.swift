@@ -5741,44 +5741,56 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         // Provider networking remains parallel, while image OCR and
         // classification stay deliberately bounded so SwiftUI remains fluid.
         let inspectionBatchSize = 6
-        for batchStart in stride(
-            from: 0,
-            to: coverCandidates.count,
-            by: inspectionBatchSize
-        ) {
-            guard !Task.isCancelled else { break }
-            let upperBound = min(
-                batchStart + inspectionBatchSize,
+        await withTaskGroup(
+            of: (Int, StorefrontImageInspection).self
+        ) { group in
+            var nextIndex = 0
+
+            func addInspection(at index: Int) {
+                let (candidate, coverType) = coverCandidates[index]
+                group.addTask {
+                    let loadsGalleryInitially =
+                        trustsSelectedSeriesIdentity
+                            && coverCandidates.count == 1
+                    let initial = await inspectedStorefrontImage(
+                        for: candidate,
+                        acceptsSquareArtwork: coverType == "audiobook",
+                        acceptsAnyArtworkShape: trustsSelectedSeriesIdentity,
+                        loadsAmazonProductGallery: loadsGalleryInitially
+                    )
+                    guard Self.shouldRetryAmazonProductGallery(
+                        provider: provider,
+                        trustsSelectedSeriesIdentity:
+                            trustsSelectedSeriesIdentity,
+                        candidateCount: coverCandidates.count,
+                        hasAcceptedImage: initial.accepted != nil
+                    ) else {
+                        return (index, initial)
+                    }
+                    let retry = await inspectedStorefrontImage(
+                        for: candidate,
+                        acceptsSquareArtwork: coverType == "audiobook",
+                        acceptsAnyArtworkShape: trustsSelectedSeriesIdentity,
+                        loadsAmazonProductGallery: true
+                    )
+                    return (index, retry.accepted == nil ? initial : retry)
+                }
+            }
+
+            let initialCount = min(
+                inspectionBatchSize,
                 coverCandidates.count
             )
-            let inspected = await withTaskGroup(
-                of: (Int, StorefrontImageInspection).self
-            ) { group in
-                for index in batchStart..<upperBound {
-                    let (candidate, coverType) = coverCandidates[index]
-                    group.addTask {
-                        (
-                            index,
-                            await inspectedStorefrontImage(
-                                for: candidate,
-                                acceptsSquareArtwork:
-                                    coverType == "audiobook",
-                                acceptsAnyArtworkShape:
-                                    trustsSelectedSeriesIdentity,
-                                loadsAmazonProductGallery:
-                                    trustsSelectedSeriesIdentity
-                                        && coverCandidates.count == 1
-                            )
-                        )
-                    }
-                }
-                var values: [(Int, StorefrontImageInspection)] = []
-                for await value in group {
-                    values.append(value)
-                }
-                return values
+            for _ in 0..<initialCount {
+                addInspection(at: nextIndex)
+                nextIndex += 1
             }
-            for (index, inspection) in inspected {
+
+            while let (index, inspection) = await group.next() {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    break
+                }
                 inspections[index] = inspection
                 await progress?(
                     .imageInspected(
@@ -5790,6 +5802,10 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                             ?? inspection.bestRejectedHeight
                     )
                 )
+                if nextIndex < coverCandidates.count {
+                    addInspection(at: nextIndex)
+                    nextIndex += 1
+                }
             }
         }
         for (index, coverCandidate) in coverCandidates.enumerated() {
@@ -8581,6 +8597,18 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             squaredDifference / Double(max(1, comparedChannelCount))
         )
         return distance <= 0.055
+    }
+
+    static func shouldRetryAmazonProductGallery(
+        provider: SableLibraryBigBookCoversProvider,
+        trustsSelectedSeriesIdentity: Bool,
+        candidateCount: Int,
+        hasAcceptedImage: Bool
+    ) -> Bool {
+        provider.isAmazon
+            && trustsSelectedSeriesIdentity
+            && candidateCount > 1
+            && !hasAcceptedImage
     }
 
     private func inspectedStorefrontImage(

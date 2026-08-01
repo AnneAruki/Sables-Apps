@@ -1076,12 +1076,14 @@ struct SableLibraryBigBookCoversClient: Sendable {
                         id: id,
                         provider: provider
                     )
-                let volumeNumber = volumeType?
+                let isChapter = volumeType?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .caseInsensitiveCompare("chapter") == .orderedSame
+                let volumeNumber = isChapter
                     ? explicitChapterNumber(in: title)
                         ?? reportedVolumeNumber
-                    : reportedVolumeNumber
+                    : explicitVolumeNumber(in: title)
+                        ?? reportedVolumeNumber
                 let sequenceIndex = volumeNumber.flatMap { number -> Int? in
                     let rounded = number.rounded()
                     guard abs(number - rounded) < 0.000_001,
@@ -1126,6 +1128,41 @@ struct SableLibraryBigBookCoversClient: Sendable {
         let patterns = [
             #"(?i)\bchapter\s*(\d+(?:\.\d+)?)\b"#,
             #"第?\s*(\d+(?:\.\d+)?)\s*話"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+            let range = NSRange(
+                normalized.startIndex..<normalized.endIndex,
+                in: normalized
+            )
+            guard let match = regex.firstMatch(in: normalized, range: range),
+                  match.numberOfRanges > 1,
+                  let valueRange = Range(
+                    match.range(at: 1),
+                    in: normalized
+                  ),
+                  let number = Double(normalized[valueRange]) else {
+                continue
+            }
+            return number
+        }
+        return nil
+    }
+
+    private static func explicitVolumeNumber(in title: String) -> Double? {
+        let normalized = title.applyingTransform(
+            .fullwidthToHalfwidth,
+            reverse: false
+        ) ?? title
+        let patterns = [
+            #"(?i)\bvol(?:ume)?\.?\s*0*(\d+(?:\.\d+)?)\b"#,
+            #"(?i)\btome\s*0*(\d+(?:\.\d+)?)\b"#,
+            #"(?i)\bband\s*0*(\d+(?:\.\d+)?)\b"#,
+            #"(?i)\btomo\s*0*(\d+(?:\.\d+)?)\b"#,
+            #"(?i)\bn[º°o]\.?\s*0*(\d+(?:\.\d+)?)\b"#,
+            #"第?\s*0*(\d+(?:\.\d+)?)\s*[巻卷]"#
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else {

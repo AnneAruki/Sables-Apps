@@ -5438,6 +5438,36 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(candidates.map(\.volumeNumber), [6, 28, 37])
     }
 
+    func testExplicitSpanishVolumeTitleOverridesMalformedBBCNumber() throws {
+        let payload = Data(
+            """
+            {
+              "data": {
+                "amz-es": [
+                  {
+                    "id": "B0DN6D8ZB3",
+                    "title": "One Piece nº 064: 100.000 contra 10",
+                    "url": "https://www.amazon.es/dp/B0DN6D8ZB3",
+                    "cover": "https://m.media-amazon.com/images/P/B0DN6D8ZB3.01.MAIN.L.jpg",
+                    "volume": {"type": "volume", "number": "100000/10"}
+                  }
+                ]
+              }
+            }
+            """.utf8
+        )
+
+        let books = try SableLibraryBigBookCoversClient.bookCandidates(
+            fromBooksData: payload,
+            provider: .amazonSpain,
+            responseProviderID: "amz-es"
+        )
+
+        XCTAssertEqual(books.count, 1)
+        XCTAssertEqual(books.first?.volumeNumber, 64)
+        XCTAssertEqual(books.first?.sequenceIndex, 64)
+    }
+
     func testBookLiveBBCRowsKeepDistinctVolumeSlots() throws {
         let rows = (1...8).map { volume in
             """
@@ -9085,6 +9115,54 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
             "https://m.media-amazon.com/images/I/81example.jpg"
         )
         XCTAssertEqual(amazonCandidates.last, amazon)
+    }
+
+    func testRejectedTrustedAmazonFamilyImageRetriesProductGallery() {
+        XCTAssertTrue(
+            SableMangaBakaStorefrontDiscovery
+                .shouldRetryAmazonProductGallery(
+                    provider: .amazonFrance,
+                    trustsSelectedSeriesIdentity: true,
+                    candidateCount: 111,
+                    hasAcceptedImage: false
+                )
+        )
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .shouldRetryAmazonProductGallery(
+                    provider: .amazonFrance,
+                    trustsSelectedSeriesIdentity: true,
+                    candidateCount: 111,
+                    hasAcceptedImage: true
+                )
+        )
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .shouldRetryAmazonProductGallery(
+                    provider: .amazonFrance,
+                    trustsSelectedSeriesIdentity: true,
+                    candidateCount: 1,
+                    hasAcceptedImage: false
+                )
+        )
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .shouldRetryAmazonProductGallery(
+                    provider: .bookWalkerGlobal,
+                    trustsSelectedSeriesIdentity: true,
+                    candidateCount: 40,
+                    hasAcceptedImage: false
+                )
+        )
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .shouldRetryAmazonProductGallery(
+                    provider: .amazonFrance,
+                    trustsSelectedSeriesIdentity: false,
+                    candidateCount: 111,
+                    hasAcceptedImage: false
+                )
+        )
     }
 
     func testMaximumImageCandidatesCoverLocalStorefrontRules() {
