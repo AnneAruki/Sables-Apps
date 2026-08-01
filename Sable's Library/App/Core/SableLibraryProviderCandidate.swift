@@ -802,20 +802,16 @@ struct SableLibraryBigBookCoversClient: Sendable {
         let responseProviderID = apiProviderID ?? provider.rawValue
         let providerItemType = itemType.lowercased() == "book" ? "book" : "series"
         let shouldPaginate =
-            responseProviderID == provider.rawValue
-                && provider.isAmazon
+            provider.usesBigBookCoversAPI
                 && providerItemType == "series"
-        // Four BBC pages cover up to 160 entries, including very long-running
-        // series, without turning a normal multi-region scan into a catalogue crawl.
-        let defaultMaximumPage = shouldPaginate ? 4 : 1
-        let maximumPage = min(
-            max(maximumPages ?? defaultMaximumPage, 1),
-            defaultMaximumPage
-        )
+        let maximumPage = shouldPaginate
+            ? maximumPages.map { max($0, 1) }
+            : 1
         var books: [SableLibraryBigBookCoversBookCandidate] = []
         var seen = Set<String>()
+        var page = 1
 
-        for page in 1...maximumPage {
+        while maximumPage.map({ page <= $0 }) ?? true {
             guard let url = booksURL(
                 itemID: itemID,
                 itemType: providerItemType,
@@ -830,13 +826,18 @@ struct SableLibraryBigBookCoversClient: Sendable {
                 provider: provider,
                 responseProviderID: responseProviderID
             )
+            let previousSeenCount = seen.count
             for book in pageBooks
             where seen.insert("\(book.provider.rawValue):\(book.id)").inserted {
                 books.append(book)
             }
-            if !shouldPaginate || pageBooks.count < Self.booksPageSize {
+            let addedBookCount = seen.count - previousSeenCount
+            if !shouldPaginate
+                || pageBooks.count < Self.booksPageSize
+                || addedBookCount == 0 {
                 break
             }
+            page += 1
         }
 
         return books.enumerated().map { offset, book in
@@ -867,26 +868,74 @@ struct SableLibraryBigBookCoversClient: Sendable {
         let providerItemType = itemType.lowercased() == "book"
             ? "book"
             : "series"
-        guard let url = booksURL(
-            itemID: itemID,
-            itemType: providerItemType,
-            apiProviderIDs: providerIDs,
-            page: 1
-        ) else {
-            return []
+        let shouldPaginate = providerItemType == "series"
+        let maximumPage = shouldPaginate
+            ? maximumPages.map { max($0, 1) }
+            : 1
+        var booksByProvider = Dictionary(
+            uniqueKeysWithValues: providerIDs.map { ($0, []) }
+        ) as [String: [SableLibraryBigBookCoversBookCandidate]]
+        var seenByProvider = Dictionary(
+            uniqueKeysWithValues: providerIDs.map { ($0, Set<String>()) }
+        )
+        var page = 1
+
+        while maximumPage.map({ page <= $0 }) ?? true {
+            guard let url = booksURL(
+                itemID: itemID,
+                itemType: providerItemType,
+                apiProviderIDs: providerIDs,
+                page: page
+            ) else {
+                break
+            }
+            let data = try await providerData(from: url)
+            var pageHasMore = false
+            var addedAnyBook = false
+            for providerID in providerIDs {
+                let pageBooks = try Self.bookCandidates(
+                    fromBooksData: data,
+                    provider: provider,
+                    responseProviderID: providerID
+                )
+                pageHasMore = pageHasMore
+                    || pageBooks.count >= Self.booksPageSize
+                for book in pageBooks {
+                    guard seenByProvider[providerID, default: []]
+                        .insert(book.id).inserted else {
+                        continue
+                    }
+                    booksByProvider[providerID, default: []].append(book)
+                    addedAnyBook = true
+                }
+            }
+            if !shouldPaginate || !pageHasMore || !addedAnyBook {
+                break
+            }
+            page += 1
         }
-        let data = try await providerData(from: url)
-        let booksByProvider = try providerIDs.map {
-            try Self.bookCandidates(
-                fromBooksData: data,
-                provider: provider,
-                responseProviderID: $0
+
+        let orderedBooksByProvider = providerIDs.map {
+            Self.booksByAssigningSequenceIndexes(
+                booksByProvider[$0] ?? []
             )
         }
         return Self.booksByMergingImageAlternatives(
-            primary: booksByProvider.first ?? [],
-            variants: Array(booksByProvider.dropFirst())
+            primary: orderedBooksByProvider.first ?? [],
+            variants: Array(orderedBooksByProvider.dropFirst())
         )
+    }
+
+    private static func booksByAssigningSequenceIndexes(
+        _ books: [SableLibraryBigBookCoversBookCandidate]
+    ) -> [SableLibraryBigBookCoversBookCandidate] {
+        books.enumerated().map { offset, book in
+            var orderedBook = book
+            if orderedBook.volumeNumber == nil {
+                orderedBook.sequenceIndex = offset + 1
+            }
+            return orderedBook
+        }
     }
 
     static func booksByMergingImageAlternatives(
@@ -1016,7 +1065,10 @@ struct SableLibraryBigBookCoversClient: Sendable {
                     ?? (row["cover_fallbacks"] as? [String])
                     ?? []
                 let volume = row["volume"] as? [String: Any]
-                let volumeNumber =
+                let volumeType = text(volume?["type"])
+                    ?? text(row["volumeType"])
+                    ?? text(row["volume_type"])
+                let reportedVolumeNumber =
                     double(volume?["number"])
                     ?? double(row["volumeNumber"])
                     ?? double(row["volume_number"])
@@ -1024,6 +1076,12 @@ struct SableLibraryBigBookCoversClient: Sendable {
                         id: id,
                         provider: provider
                     )
+                let volumeNumber = volumeType?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare("chapter") == .orderedSame
+                    ? explicitChapterNumber(in: title)
+                        ?? reportedVolumeNumber
+                    : reportedVolumeNumber
                 let sequenceIndex = volumeNumber.flatMap { number -> Int? in
                     let rounded = number.rounded()
                     guard abs(number - rounded) < 0.000_001,
@@ -1042,7 +1100,7 @@ struct SableLibraryBigBookCoversClient: Sendable {
                     coverURL: coverURL,
                     coverFallbackURLs: fallbackURLs,
                     volumeNumber: volumeNumber,
-                    volumeType: text(volume?["type"]) ?? text(row["volumeType"]) ?? text(row["volume_type"]),
+                    volumeType: volumeType,
                     sequenceIndex: sequenceIndex,
                     bookType: text(row["bookType"])
                         ?? text(row["book_type"])
@@ -1058,6 +1116,37 @@ struct SableLibraryBigBookCoversClient: Sendable {
                 )
             }
         }
+    }
+
+    private static func explicitChapterNumber(in title: String) -> Double? {
+        let normalized = title.applyingTransform(
+            .fullwidthToHalfwidth,
+            reverse: false
+        ) ?? title
+        let patterns = [
+            #"(?i)\bchapter\s*(\d+(?:\.\d+)?)\b"#,
+            #"第?\s*(\d+(?:\.\d+)?)\s*話"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+            let range = NSRange(
+                normalized.startIndex..<normalized.endIndex,
+                in: normalized
+            )
+            guard let match = regex.firstMatch(in: normalized, range: range),
+                  match.numberOfRanges > 1,
+                  let valueRange = Range(
+                    match.range(at: 1),
+                    in: normalized
+                  ),
+                  let number = Double(normalized[valueRange]) else {
+                continue
+            }
+            return number
+        }
+        return nil
     }
 
     private static func normalizedPublicationType(

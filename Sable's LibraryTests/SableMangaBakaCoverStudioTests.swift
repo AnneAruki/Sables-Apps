@@ -4001,6 +4001,43 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
     }
 
+    func testShueishaFullSeriesReadsPastFortyItems() throws {
+        let items: [[String: Any]] = (1...41).map { volume in
+            [
+                "isbn": "978-4-08-000\(String(format: "%04d", volume))",
+                "item_name": "ONE PIECE \(volume)",
+                "view_volume_number": String(volume),
+                "image_url":
+                    "https://dosbg3xlm0x1t.cloudfront.net/images/items/\(volume)/240/\(volume).jpg"
+            ]
+        }
+        let payload: [String: Any] = [
+            "count": 1,
+            "data": [
+                "series_data": [
+                    "series_id": 35169,
+                    "series_name": "ONE PIECE",
+                    "main_label_name": "ジャンプコミックス",
+                    "genre_datas": ["コミックス", "ジャンプコミックス"]
+                ],
+                "item_datas": items
+            ]
+        ]
+        let jsonData = try JSONSerialization.data(withJSONObject: payload)
+        let json = try XCTUnwrap(String(data: jsonData, encoding: .utf8))
+        let html = "<script>var ssd = \(json); var order = 1;</script>"
+
+        let series = try XCTUnwrap(
+            SableMangaBakaStorefrontDiscovery.shueishaFullSeries(
+                in: html
+            )
+        )
+
+        XCTAssertEqual(series.seriesId, 35169)
+        XCTAssertEqual(series.itemDatas.count, 41)
+        XCTAssertEqual(series.itemDatas.last?.viewVolumeNumber, "41")
+    }
+
     func testKodanshaCatalogKeepsExactMangaVolumesAndDigitalRetailers()
         throws {
         let series = SableMangaBakaSeriesSummary(
@@ -5004,7 +5041,7 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(books.last?.volumeNumber, 42)
     }
 
-    func testAmazonSeriesBooksStopAfterFourFullPages() async throws {
+    func testAmazonSeriesBooksRespectExplicitFourPageBudget() async throws {
         let client = SableLibraryBigBookCoversClient(
             apiBaseURL: URL(string: "https://example.com")!,
             dataLoader: { url in
@@ -5039,14 +5076,62 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
 
         let books = try await client.books(
             itemID: "B07JK95JJH",
-            provider: .amazon
+            provider: .amazon,
+            maximumPages: 4
         )
 
         XCTAssertEqual(books.count, 160)
         XCTAssertEqual(books.last?.volumeNumber, 160)
     }
 
-    func testAmazonSeriesBooksRespectAutomaticTwoPageBudget() async throws {
+    func testBBCSeriesBooksContinuePastFirstFortyForShueisha() async throws {
+        func pageData(start: Int, count: Int) throws -> Data {
+            let rows = (start..<(start + count)).map { index in
+                [
+                    "id": "978408\(String(format: "%07d", index))",
+                    "title": "ONE PIECE \(index)",
+                    "cover": "https://example.com/\(index).jpg",
+                    "volume": [
+                        "type": "volume",
+                        "number": String(index)
+                    ]
+                ] as [String: Any]
+            }
+            return try JSONSerialization.data(
+                withJSONObject: ["data": ["shueisha": rows]]
+            )
+        }
+
+        let pages = [
+            1: try pageData(start: 1, count: 40),
+            2: try pageData(start: 41, count: 40),
+            3: try pageData(start: 81, count: 35)
+        ]
+        let client = SableLibraryBigBookCoversClient(
+            apiBaseURL: URL(string: "https://example.com")!,
+            dataLoader: { url in
+                let page = URLComponents(
+                    url: url,
+                    resolvingAgainstBaseURL: false
+                )?.queryItems?
+                    .first(where: { $0.name == "page" })?
+                    .value
+                    .flatMap(Int.init) ?? 1
+                return pages[page]
+                    ?? Data(#"{"data":{"shueisha":[]}}"#.utf8)
+            }
+        )
+
+        let books = try await client.books(
+            itemID: "35169",
+            provider: .shueisha
+        )
+
+        XCTAssertEqual(books.count, 115)
+        XCTAssertEqual(books.last?.volumeNumber, 115)
+    }
+
+    func testAmazonSeriesBooksRespectExplicitTwoPageBudget() async throws {
         let client = SableLibraryBigBookCoversClient(
             apiBaseURL: URL(string: "https://example.com")!,
             dataLoader: { url in
@@ -5151,6 +5236,56 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
     }
 
+    func testBBCPreviewProvidersContinuePastFirstFortyRows() async throws {
+        let client = SableLibraryBigBookCoversClient(
+            apiBaseURL: URL(string: "https://example.com")!,
+            dataLoader: { url in
+                let components = URLComponents(
+                    url: url,
+                    resolvingAgainstBaseURL: false
+                )
+                let page = components?.queryItems?
+                    .first(where: { $0.name == "page" })?
+                    .value
+                    .flatMap(Int.init) ?? 1
+                let providerIDs = components?.queryItems?
+                    .filter { $0.name.hasPrefix("series(") }
+                    .compactMap {
+                        $0.name.split(separator: "(").last?.dropLast()
+                    } ?? []
+                let range = page == 1 ? 1...40 : 41...42
+                var response: [String: Any] = [:]
+                for providerID in providerIDs {
+                    response[String(providerID)] = range.map { index in
+                        [
+                            "id": "volume-\(index)",
+                            "providerId": String(providerID),
+                            "title": "Volume \(index)",
+                            "cover":
+                                "https://example.com/\(providerID)/\(index).jpg",
+                            "volume": [
+                                "type": "volume",
+                                "number": String(index)
+                            ]
+                        ] as [String: Any]
+                    }
+                }
+                return try JSONSerialization.data(
+                    withJSONObject: ["data": response]
+                )
+            }
+        )
+
+        let books = try await client.booksWithPreviewAlternatives(
+            itemID: "series-example",
+            provider: .bookWalkerGlobal
+        )
+
+        XCTAssertEqual(books.count, 42)
+        XCTAssertEqual(books.last?.volumeNumber, 42)
+        XCTAssertEqual(books.last?.coverFallbackURLs.count, 1)
+    }
+
     func testBBCBookWalkerPreviewCannotReplacePrimaryVolumeMetadata() async throws {
         let client = SableLibraryBigBookCoversClient(
             apiBaseURL: URL(string: "https://example.com")!,
@@ -5250,6 +5385,57 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
 
         XCTAssertEqual(books.map(\.publicationType), ["digital", "physical"])
+    }
+
+    func testBookWalkerChapterTitlesOverrideIncorrectBBCNumbers() throws {
+        let payload = Data(
+            """
+            {
+              "data": {
+                "bw-wa": [
+                  {
+                    "id": "6db99b37-632e-4a0e-92cb-256627002453",
+                    "title": "第6話　“１人目”",
+                    "cover": "https://c.bookwalker.jp/chapter-6.jpg",
+                    "volume": {"type": "chapter", "number": "1"}
+                  },
+                  {
+                    "id": "4101f778-ad1f-4155-9333-8a7075920ef7",
+                    "title": "第28話　“三日月”",
+                    "cover": "https://c.bookwalker.jp/chapter-28.jpg",
+                    "volume": {"type": "chapter", "number": "3"}
+                  },
+                  {
+                    "id": "chapter-37",
+                    "title": "第37話　海賊“百計のクロ”",
+                    "cover": "https://c.bookwalker.jp/chapter-37.jpg",
+                    "volume": {"type": "chapter", "number": "100"}
+                  }
+                ]
+              }
+            }
+            """.utf8
+        )
+
+        let books = try SableLibraryBigBookCoversClient.bookCandidates(
+            fromBooksData: payload,
+            provider: .bookWalkerJP,
+            responseProviderID: "bw-wa"
+        )
+
+        XCTAssertEqual(books.count, 3)
+        XCTAssertTrue(books.allSatisfy { $0.volumeType == "chapter" })
+        XCTAssertEqual(books.map(\.volumeNumber), [6, 28, 37])
+        XCTAssertEqual(books.map(\.sequenceIndex), [6, 28, 37])
+
+        let candidates = SableMangaBakaStorefrontDiscovery
+            .exactStoreChapterCandidates(
+                from: books,
+                source: .bookWalkerJP,
+                language: "ja"
+            )
+        XCTAssertTrue(candidates.allSatisfy { $0.providerType == "chapter" })
+        XCTAssertEqual(candidates.map(\.volumeNumber), [6, 28, 37])
     }
 
     func testBookLiveBBCRowsKeepDistinctVolumeSlots() throws {
@@ -8855,6 +9041,8 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         let bbcBookLive = "https://c.roler.dev/bl/965497-001/0"
         let bbcBookWalker = "https://c.roler.dev/bw/303953-1/0"
         let bbcAmazon = "https://c.roler.dev/amz/B09RN5QP4G/0"
+        let amazon =
+            "https://m.media-amazon.com/images/I/81example._SL500_.jpg"
         let apple =
             "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/example/9781975388171.jpg/100x100bb.jpg"
 
@@ -8872,6 +9060,10 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
         XCTAssertTrue(
             SableMangaBakaStorefrontDiscovery
+                .usesLocalMaximumImageResolution(for: amazon)
+        )
+        XCTAssertTrue(
+            SableMangaBakaStorefrontDiscovery
                 .usesLocalMaximumImageResolution(for: apple)
         )
 
@@ -8885,6 +9077,14 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertFalse(
             appleCandidates.contains { $0.lowercased().hasSuffix(".png") }
         )
+
+        let amazonCandidates = SableMangaBakaStorefrontDiscovery
+            .maximumImageURLCandidates(from: amazon)
+        XCTAssertEqual(
+            amazonCandidates.first,
+            "https://m.media-amazon.com/images/I/81example.jpg"
+        )
+        XCTAssertEqual(amazonCandidates.last, amazon)
     }
 
     func testMaximumImageCandidatesCoverLocalStorefrontRules() {

@@ -50,6 +50,14 @@ CONFIGURATION="Debug"
 DESTINATION="platform=macOS"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOCAL_DEVELOPMENT_TEAM="${SABLE_DEVELOPMENT_TEAM:-}"
+if [[ -z "$LOCAL_DEVELOPMENT_TEAM" ]]; then
+  LOCAL_DEVELOPMENT_TEAM="$(defaults read com.apple.dt.Xcode IDEProvisioningTeamManagerLastSelectedTeamID 2>/dev/null || true)"
+fi
+XCODEBUILD_SIGNING_ARGUMENTS=()
+if [[ -n "$LOCAL_DEVELOPMENT_TEAM" ]]; then
+  XCODEBUILD_SIGNING_ARGUMENTS+=(DEVELOPMENT_TEAM="$LOCAL_DEVELOPMENT_TEAM")
+fi
 DEFAULT_DERIVED_DATA_ROOT="${TMPDIR:-/tmp}"
 DEFAULT_DERIVED_DATA_ROOT="${DEFAULT_DERIVED_DATA_ROOT%/}"
 case "$APP_TARGET" in
@@ -68,6 +76,7 @@ APP_BUNDLE="$DERIVED_DATA_DIR/Build/Products/$CONFIGURATION/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 PACKAGE_DIR="${SABLE_LIBRARY_PACKAGE_DIR:-$ROOT_DIR/outputs}"
 PACKAGE_ZIP="$PACKAGE_DIR/$PACKAGE_BASENAME"
+DEBUG_APP_DIR="$ROOT_DIR/build/Debug"
 
 case "$MODE" in
   --signing|signing|--package|package)
@@ -99,22 +108,6 @@ freshen_derived_data() {
 
 build_app() {
   freshen_derived_data
-  if [[ "$CONFIGURATION" == "Debug" && "$APP_TARGET" != "covers" ]]; then
-    xcodebuild \
-      -project "$ROOT_DIR/$PROJECT_FILE" \
-      -scheme "$SCHEME" \
-      -configuration "$CONFIGURATION" \
-      -destination "$DESTINATION" \
-      -derivedDataPath "$DERIVED_DATA_DIR" \
-      CODE_SIGN_STYLE=Manual \
-      CODE_SIGN_IDENTITY=- \
-      DEVELOPMENT_TEAM= \
-      CODE_SIGN_ENTITLEMENTS= \
-      CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
-      build
-    return
-  fi
-
   if ! xcodebuild \
       -project "$ROOT_DIR/$PROJECT_FILE" \
       -scheme "$SCHEME" \
@@ -122,14 +115,31 @@ build_app() {
       -destination "$DESTINATION" \
       -derivedDataPath "$DERIVED_DATA_DIR" \
       -allowProvisioningUpdates \
+      "${XCODEBUILD_SIGNING_ARGUMENTS[@]}" \
       build; then
-    if [[ "$APP_TARGET" == "covers" && "$CONFIGURATION" == "Debug" ]]; then
+    if [[ "$CONFIGURATION" == "Debug" ]]; then
       echo >&2
-      echo "Sable's Covers needs one signed Run from Xcode before the local build can use Keychain." >&2
-      echo "Open $PROJECT_FILE, choose the Sable's Covers scheme, and press Run once." >&2
+      echo "$APP_NAME needs one signed Run from Xcode before the local build can use the App Group and Keychain." >&2
+      echo "Open $PROJECT_FILE, choose the $SCHEME scheme, and press Run once." >&2
     fi
     return 1
   fi
+}
+
+stage_debug_app() {
+  [[ "$CONFIGURATION" == "Debug" ]] || return
+
+  local staged_app="$DEBUG_APP_DIR/.$APP_NAME.app.staging"
+  local debug_app="$DEBUG_APP_DIR/$APP_NAME.app"
+
+  mkdir -p "$DEBUG_APP_DIR"
+  rm -rf "$staged_app"
+  /usr/bin/ditto "$APP_BUNDLE" "$staged_app"
+  rm -rf "$debug_app"
+  mv "$staged_app" "$debug_app"
+
+  APP_BUNDLE="$debug_app"
+  APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 }
 
 test_app() {
@@ -140,6 +150,8 @@ test_app() {
     -configuration Debug \
     -destination "$DESTINATION" \
     -derivedDataPath "$DERIVED_DATA_DIR" \
+    -allowProvisioningUpdates \
+    "${XCODEBUILD_SIGNING_ARGUMENTS[@]}" \
     test
 }
 
@@ -151,6 +163,8 @@ focused_tests() {
     -configuration Debug \
     -destination "$DESTINATION" \
     -derivedDataPath "$DERIVED_DATA_DIR" \
+    -allowProvisioningUpdates \
+    "${XCODEBUILD_SIGNING_ARGUMENTS[@]}" \
     -only-testing:"Sable's LibraryTests/SableLibraryFileSafetyTests/testAppleBooksRepairRejectsUnsafeArchiveEntryNames" \
     -only-testing:"Sable's LibraryTests/SableLibraryFileSafetyTests/testAppleBooksArchiveSnapshotRejectsUnsafeZipRecords" \
     -only-testing:"Sable's LibraryTests/SableLibraryFileSafetyTests/testNameCollisionNeedsExplicitMoveAsideResolutionBeforeApply" \
@@ -210,6 +224,7 @@ case "$MODE" in
     ;;
   *)
     build_app
+    stage_debug_app
     ;;
 esac
 

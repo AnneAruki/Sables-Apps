@@ -775,7 +775,7 @@ nonisolated struct SableAudibleCatalogClient: Sendable {
         configuration.timeoutIntervalForResource = 25
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.httpMaximumConnectionsPerHost = 2
+        configuration.httpMaximumConnectionsPerHost = 6
         return URLSession(configuration: configuration)
     }()
 
@@ -1019,6 +1019,34 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 case itemName = "item_name"
                 case viewVolumeNumber = "view_volume_number"
                 case imageURL = "image_url"
+            }
+        }
+    }
+
+    private struct ShueishaSeriesPayload: Decodable {
+        var data: SeriesData
+
+        struct SeriesData: Decodable {
+            var seriesData: Metadata
+            var itemDatas: [ShueishaSearchPayload.Item]
+
+            private enum CodingKeys: String, CodingKey {
+                case seriesData = "series_data"
+                case itemDatas = "item_datas"
+            }
+        }
+
+        struct Metadata: Decodable {
+            var seriesId: Int
+            var seriesName: String
+            var labelName: String?
+            var genreDatas: [String]?
+
+            private enum CodingKeys: String, CodingKey {
+                case seriesId = "series_id"
+                case seriesName = "series_name"
+                case labelName = "main_label_name"
+                case genreDatas = "genre_datas"
             }
         }
     }
@@ -3020,9 +3048,34 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                   ) else {
                 continue
             }
+
+            var completeSeries = matchedSeries
+            var referenceURL = searchURL
+            if var seriesComponents = URLComponents(
+                string:
+                    "https://www.shueisha.co.jp/books/search/search.html"
+            ) {
+                seriesComponents.queryItems = [
+                    URLQueryItem(
+                        name: "seriesid",
+                        value: String(matchedSeries.seriesId)
+                    )
+                ]
+                if let seriesURL = seriesComponents.url,
+                   let seriesHTML = await Self.storefrontPageHTML(
+                    from: seriesURL.absoluteString
+                   ),
+                   let fullSeries = Self.shueishaFullSeries(
+                    in: seriesHTML
+                   ),
+                   fullSeries.seriesId == matchedSeries.seriesId {
+                    completeSeries = fullSeries
+                    referenceURL = seriesURL
+                }
+            }
             return Self.shueishaPublisherReferences(
-                from: matchedSeries,
-                searchURL: searchURL,
+                from: completeSeries,
+                searchURL: referenceURL,
                 requiresRelationshipReview: !hasPublisherEvidence
             )
         }
@@ -3042,6 +3095,29 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         return try? JSONDecoder().decode(
             ShueishaSearchPayload.self,
             from: Data(json.utf8)
+        )
+    }
+
+    static func shueishaFullSeries(
+        in html: String
+    ) -> ShueishaSearchPayload.Series? {
+        guard let json = firstPathCapture(
+            in: html,
+            pattern:
+                #"(?s)var\s+ssd\s*=\s*(\{.*?\});\s*var\s+order\s*="#
+        ),
+        let payload = try? JSONDecoder().decode(
+            ShueishaSeriesPayload.self,
+            from: Data(json.utf8)
+        ) else {
+            return nil
+        }
+        return ShueishaSearchPayload.Series(
+            seriesId: payload.data.seriesData.seriesId,
+            seriesName: payload.data.seriesData.seriesName,
+            labelName: payload.data.seriesData.labelName,
+            genreDatas: payload.data.seriesData.genreDatas,
+            itemDatas: payload.data.itemDatas
         )
     }
 
@@ -5664,7 +5740,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         var inspections: [Int: StorefrontImageInspection] = [:]
         // Provider networking remains parallel, while image OCR and
         // classification stay deliberately bounded so SwiftUI remains fluid.
-        let inspectionBatchSize = 2
+        let inspectionBatchSize = 6
         for batchStart in stride(
             from: 0,
             to: coverCandidates.count,
@@ -5691,6 +5767,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                                     trustsSelectedSeriesIdentity,
                                 loadsAmazonProductGallery:
                                     trustsSelectedSeriesIdentity
+                                        && coverCandidates.count == 1
                             )
                         )
                     }
@@ -5703,21 +5780,21 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             }
             for (index, inspection) in inspected {
                 inspections[index] = inspection
+                await progress?(
+                    .imageInspected(
+                        provider: provider,
+                        accepted: inspection.accepted != nil,
+                        width: inspection.accepted?.width
+                            ?? inspection.bestRejectedWidth,
+                        height: inspection.accepted?.height
+                            ?? inspection.bestRejectedHeight
+                    )
+                )
             }
         }
         for (index, coverCandidate) in coverCandidates.enumerated() {
             let (candidate, coverType) = coverCandidate
             guard let inspection = inspections[index] else { continue }
-            await progress?(
-                .imageInspected(
-                    provider: provider,
-                    accepted: inspection.accepted != nil,
-                    width: inspection.accepted?.width
-                        ?? inspection.bestRejectedWidth,
-                    height: inspection.accepted?.height
-                        ?? inspection.bestRejectedHeight
-                )
-            )
             if inspection.accepted == nil,
                let width = inspection.bestRejectedWidth,
                let height = inspection.bestRejectedHeight {
@@ -8091,8 +8168,8 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 ).inserted
             }
             .map { book in
-                let chapterNumber = book.volumeNumber
-                    ?? Self.chapterNumber(in: book.title)
+                let chapterNumber = Self.chapterNumber(in: book.title)
+                    ?? book.volumeNumber
                     ?? Double(book.sequenceIndex)
                 return SableLibraryProviderCoverCandidate(
                     provider: .local,
@@ -8621,6 +8698,8 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             return false
         }
         return [
+            "media-amazon.com",
+            "ssl-images-amazon.com",
             "mzstatic.com",
             "yes24.com",
             "kyobobook.co.kr",
@@ -10173,8 +10252,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             books = try await providerClient.books(
                 itemID: reference.itemID,
                 itemType: reference.itemType,
-                provider: reference.provider,
-                maximumPages: reference.provider.isAmazon ? 2 : nil
+                provider: reference.provider
             )
         }
         books = Self.booksScopedToExactStoreReference(

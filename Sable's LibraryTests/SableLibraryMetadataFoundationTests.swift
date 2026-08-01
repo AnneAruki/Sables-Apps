@@ -46,9 +46,30 @@ final class SableLibraryMetadataFoundationTests: XCTestCase {
 
     func testSharedContainerUsesMacAppGroupIdentifier() {
         let identifier = SableLibrarySharedContainer.appGroupIdentifier
-        XCTAssertTrue(
-            identifier == nil
-                || identifier?.hasSuffix(".com.annearuki.Sables") == true
+        XCTAssertNotNil(identifier)
+        XCTAssertEqual(identifier?.hasSuffix(".com.annearuki.Sables"), true)
+        XCTAssertNotNil(SableLibrarySharedContainer.appGroupURL)
+    }
+
+    func testSharedContainerFindsSuiteGroupAmongSignedEntitlements() {
+        let identifier = SableLibrarySharedContainer.resolvedAppGroupIdentifier(
+            entitlementIdentifiers: [
+                "TEAM.other.group",
+                "TEAM.com.annearuki.Sables"
+            ]
+        )
+
+        XCTAssertEqual(identifier, "TEAM.com.annearuki.Sables")
+    }
+
+    func testSharedContainerRejectsBareOrUnexpandedGroupNames() {
+        XCTAssertNil(
+            SableLibrarySharedContainer.resolvedAppGroupIdentifier(
+                entitlementIdentifiers: [
+                    "com.annearuki.Sables",
+                    "$(AppIdentifierPrefix)com.annearuki.Sables"
+                ]
+            )
         )
     }
 

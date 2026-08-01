@@ -4,17 +4,34 @@
 //
 
 import Foundation
+import Security
 
 nonisolated enum SableLibrarySharedContainer {
-    private static let appGroupInfoKey = "SableAppGroupIdentifier"
+    private static let appGroupBaseIdentifier = "com.annearuki.Sables"
+    private static let appGroupEntitlementKey = "com.apple.security.application-groups"
 
     static var appGroupIdentifier: String? {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: appGroupInfoKey) as? String else {
-            return nil
-        }
+        resolvedAppGroupIdentifier(entitlementIdentifiers: signedAppGroupIdentifiers)
+    }
 
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+    static func resolvedAppGroupIdentifier(entitlementIdentifiers: [String]) -> String? {
+        let requiredSuffix = ".\(appGroupBaseIdentifier)"
+        return entitlementIdentifiers.lazy
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { $0.hasSuffix(requiredSuffix) }
+    }
+
+    private static var signedAppGroupIdentifiers: [String] {
+        guard let task = SecTaskCreateFromSelf(nil) else { return [] }
+        var error: Unmanaged<CFError>?
+        guard let value = SecTaskCopyValueForEntitlement(
+            task,
+            appGroupEntitlementKey as CFString,
+            &error
+        ) else {
+            return []
+        }
+        return value as? [String] ?? []
     }
 
     static var appGroupURL: URL? {
