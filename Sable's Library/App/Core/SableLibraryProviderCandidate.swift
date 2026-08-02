@@ -93,6 +93,27 @@ enum SableLibraryProviderCoverQuality: String, Codable, Sendable, Equatable {
     case unknown
 }
 
+extension SableLibraryProviderCoverQuality {
+    static func measured(
+        width: Int?,
+        height: Int?,
+        byteCount: Int?
+    ) -> SableLibraryProviderCoverQuality {
+        let longestSide = max(width ?? 0, height ?? 0)
+        let shortestSide = min(width ?? 0, height ?? 0)
+        if longestSide == 0, shortestSide == 0 {
+            return .unknown
+        }
+        if shortestSide < 500 || longestSide < 800 {
+            return .lowResolution
+        }
+        if longestSide >= 1800 || (byteCount ?? 0) >= 1_000_000 {
+            return .highResolution
+        }
+        return .usable
+    }
+}
+
 enum SableLibraryCoverSource: String, Codable, Sendable, Equatable, CaseIterable {
     case bookLiveJP = "booklive_jp"
     case bookWalkerJP = "bookwalker_jp"
@@ -527,7 +548,15 @@ struct SableLibraryBigBookCoversBookCandidate: Sendable, Equatable {
     var volumeType: String?
     var sequenceIndex: Int
     var bookType: String?
+    var width: Int? = nil
+    var height: Int? = nil
+    var byteCount: Int? = nil
+    var sourceImageURLs: [String] = []
     var publicationType: String? = nil
+
+    var coverQuality: SableLibraryProviderCoverQuality {
+        .measured(width: width, height: height, byteCount: byteCount)
+    }
 }
 
 struct SableLibraryCoverDownloadLocalBook: Sendable, Equatable {
@@ -1059,15 +1088,19 @@ struct SableLibraryBigBookCoversClient: Sendable {
             )
             return rows.enumerated().compactMap { index, row in
                 guard let id = text(row["id"]),
-                      let title = text(row["title"]),
-                      let coverURL = text(row["cover"]) ?? text(row["coverURL"]) ?? text(row["cover_url"]) else { return nil }
-                let fallbackURLs = (row["coverFallbacks"] as? [String])
-                    ?? (row["cover_fallbacks"] as? [String])
-                    ?? []
+                      let title = text(row["title"]) else { return nil }
+                let coverURLs = imageURLCandidates(from: row)
+                guard let coverURL = coverURLs.first else { return nil }
+                let fallbackURLs = imageFallbackURLs(from: row)
+                let sourceImageURLs = uniqueNonEmptyStrings(
+                    coverURLs + fallbackURLs
+                )
                 let volume = row["volume"] as? [String: Any]
                 let volumeType = text(volume?["type"])
                     ?? text(row["volumeType"])
                     ?? text(row["volume_type"])
+                let measuredDimensions = imageDimensions(from: row)
+                let byteCount = imageByteCount(from: row)
                 let reportedVolumeNumber =
                     double(volume?["number"])
                     ?? double(row["volumeNumber"])
@@ -1107,6 +1140,10 @@ struct SableLibraryBigBookCoversClient: Sendable {
                     bookType: text(row["bookType"])
                         ?? text(row["book_type"])
                         ?? inferredBookType(from: title),
+                    width: measuredDimensions.width,
+                    height: measuredDimensions.height,
+                    byteCount: byteCount,
+                    sourceImageURLs: sourceImageURLs,
                     publicationType: normalizedPublicationType(
                         text(row["publicationType"])
                             ?? text(row["publication_type"])
@@ -1118,6 +1155,107 @@ struct SableLibraryBigBookCoversClient: Sendable {
                 )
             }
         }
+    }
+
+    private static func imageURLCandidates(
+        from row: [String: Any]
+    ) -> [String] {
+        uniqueNonEmptyStrings([
+            text(row["cover"]),
+            text(row["coverURL"]),
+            text(row["cover_url"]),
+            text(row["imageURL"]),
+            text(row["image_url"]),
+            text(nestedValue(row["cover"], "raw", "url")),
+            text(nestedValue(row["cover"], "url")),
+            text(nestedValue(row["image"], "raw", "url")),
+            text(nestedValue(row["image"], "url")),
+            text(nestedValue(row["cover"], "original", "url")),
+            text(nestedValue(row["image"], "original", "url"))
+        ].compactMap { $0 })
+    }
+
+    private static func imageFallbackURLs(
+        from row: [String: Any]
+    ) -> [String] {
+        uniqueNonEmptyStrings(
+            textArray(row["coverFallbacks"])
+                + textArray(row["cover_fallbacks"])
+                + textArray(row["imageFallbacks"])
+                + textArray(row["image_fallbacks"])
+                + textArray(row["fallbacks"])
+                + textArray(nestedValue(row["cover"], "fallbacks"))
+                + textArray(nestedValue(row["cover"], "raw", "fallbacks"))
+                + textArray(nestedValue(row["image"], "fallbacks"))
+                + textArray(nestedValue(row["image"], "raw", "fallbacks"))
+        )
+    }
+
+    private static func imageDimensions(
+        from row: [String: Any]
+    ) -> (width: Int?, height: Int?) {
+        let width =
+            int(nestedValue(row["image"], "raw", "width"))
+            ?? int(nestedValue(row["image"], "width"))
+            ?? int(nestedValue(row["cover"], "raw", "width"))
+            ?? int(nestedValue(row["cover"], "width"))
+            ?? int(row["imageWidth"])
+            ?? int(row["image_width"])
+            ?? int(row["coverWidth"])
+            ?? int(row["cover_width"])
+            ?? int(row["width"])
+        let height =
+            int(nestedValue(row["image"], "raw", "height"))
+            ?? int(nestedValue(row["image"], "height"))
+            ?? int(nestedValue(row["cover"], "raw", "height"))
+            ?? int(nestedValue(row["cover"], "height"))
+            ?? int(row["imageHeight"])
+            ?? int(row["image_height"])
+            ?? int(row["coverHeight"])
+            ?? int(row["cover_height"])
+            ?? int(row["height"])
+        if width != nil || height != nil {
+            return (width, height)
+        }
+        return dimensionsPair(
+            text(row["dimensions"])
+                ?? text(row["dimension"])
+                ?? text(row["size"])
+                ?? text(nestedValue(row["image"], "dimensions"))
+                ?? text(nestedValue(row["cover"], "dimensions"))
+        )
+    }
+
+    private static func imageByteCount(from row: [String: Any]) -> Int? {
+        int(nestedValue(row["image"], "raw", "size"))
+            ?? int(nestedValue(row["image"], "size"))
+            ?? int(nestedValue(row["cover"], "raw", "size"))
+            ?? int(nestedValue(row["cover"], "size"))
+            ?? int(row["byteCount"])
+            ?? int(row["byte_count"])
+            ?? int(row["bytes"])
+            ?? int(row["fileSize"])
+            ?? int(row["file_size"])
+    }
+
+    private static func dimensionsPair(
+        _ value: String?
+    ) -> (width: Int?, height: Int?) {
+        guard let value,
+              let regex = try? NSRegularExpression(
+                pattern: #"(\d{2,5})\s*[x×]\s*(\d{2,5})"#,
+                options: [.caseInsensitive]
+              ) else {
+            return (nil, nil)
+        }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range),
+              match.numberOfRanges > 2,
+              let widthRange = Range(match.range(at: 1), in: value),
+              let heightRange = Range(match.range(at: 2), in: value) else {
+            return (nil, nil)
+        }
+        return (Int(value[widthRange]), Int(value[heightRange]))
     }
 
     private static func explicitChapterNumber(in title: String) -> Double? {
@@ -1423,12 +1561,54 @@ struct SableLibraryBigBookCoversClient: Sendable {
         }
     }
 
+    private static func textArray(_ value: Any?) -> [String] {
+        switch value {
+        case let strings as [String]:
+            strings.compactMap(text)
+        case let values as [Any]:
+            values.compactMap(text)
+        case let string as String:
+            [string].compactMap(text)
+        default:
+            []
+        }
+    }
+
+    private static func uniqueNonEmptyStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    private static func int(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        guard let text = text(value) else { return nil }
+        let normalized = text
+            .replacingOccurrences(of: ",", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Int(normalized)
+    }
+
     private static func double(_ value: Any?) -> Double? {
         if let number = value as? NSNumber {
             return number.doubleValue
         }
         guard let text = text(value) else { return nil }
         return Double(text)
+    }
+
+    private static func nestedValue(_ value: Any?, _ path: String...) -> Any? {
+        var current = value
+        for key in path {
+            guard let dictionary = current as? [String: Any] else {
+                return nil
+            }
+            current = dictionary[key]
+        }
+        return current
     }
 
     private static func parsedVolumeNumber(in title: String) -> Double? {
@@ -7825,6 +8005,7 @@ struct SableLibraryProviderCoverCandidate: Codable, Sendable, Equatable {
     var storeURLs: [String]
     var quality: SableLibraryProviderCoverQuality
     var fallbackImageURLs: [String] = []
+    var sourceImageURLs: [String]? = nil
     var publicationType: String? = nil
 
     var canReplaceNormalCover: Bool {
@@ -8263,12 +8444,15 @@ enum SableLibraryProviderCandidateParser {
                 providerType: book.bookType,
                 editionNote: role == .normal ? nil : book.title,
                 imageURL: book.coverURL,
-                width: nil,
-                height: nil,
-                byteCount: nil,
+                width: book.width,
+                height: book.height,
+                byteCount: book.byteCount,
                 storeURLs: [book.url].compactMap { $0 },
-                quality: .unknown,
+                quality: book.coverQuality,
                 fallbackImageURLs: book.coverFallbackURLs,
+                sourceImageURLs: book.sourceImageURLs.isEmpty
+                    ? nil
+                    : book.sourceImageURLs,
                 publicationType: book.publicationType
             )
         }
@@ -8959,18 +9143,7 @@ enum SableLibraryProviderCandidateParser {
     }
 
     private static func coverQuality(width: Int?, height: Int?, byteCount: Int?) -> SableLibraryProviderCoverQuality {
-        let longestSide = max(width ?? 0, height ?? 0)
-        let shortestSide = min(width ?? 0, height ?? 0)
-        if longestSide == 0, shortestSide == 0 {
-            return .unknown
-        }
-        if shortestSide < 500 || longestSide < 800 {
-            return .lowResolution
-        }
-        if longestSide >= 1800 || (byteCount ?? 0) >= 1_000_000 {
-            return .highResolution
-        }
-        return .usable
+        .measured(width: width, height: height, byteCount: byteCount)
     }
 
     private static func ranobeDBCoverCandidate(

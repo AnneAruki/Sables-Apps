@@ -9117,6 +9117,51 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(amazonCandidates.last, amazon)
     }
 
+    func testTrustedProviderImageMetadataCanSkipLocalMaximumProbing() {
+        let candidate = SableLibraryProviderCoverCandidate(
+            provider: .local,
+            providerSeriesID: "CNT_3Y7A6PRYA270",
+            providerItemID: "35AX739VR5J0",
+            title: "Volume 1",
+            volumeIndex: "1",
+            volumeNumber: 1,
+            mediaType: "novel",
+            language: "en",
+            role: .normal,
+            providerType: "novel",
+            editionNote: nil,
+            imageURL: "https://m.media-amazon.com/images/I/example.jpg",
+            width: 1733,
+            height: 2600,
+            byteCount: 1_600_000,
+            storeURLs: ["https://www.amazon.com/dp/B000000000"],
+            quality: .highResolution
+        )
+
+        XCTAssertTrue(
+            SableMangaBakaStorefrontDiscovery
+                .providerImageMetadataIsUsable(
+                    for: candidate,
+                    acceptsSquareArtwork: false,
+                    acceptsAnyArtworkShape: false
+                )
+        )
+
+        var weakCandidate = candidate
+        weakCandidate.width = 240
+        weakCandidate.height = 333
+        weakCandidate.quality = .lowResolution
+
+        XCTAssertFalse(
+            SableMangaBakaStorefrontDiscovery
+                .providerImageMetadataIsUsable(
+                    for: weakCandidate,
+                    acceptsSquareArtwork: false,
+                    acceptsAnyArtworkShape: false
+                )
+        )
+    }
+
     func testRejectedTrustedAmazonFamilyImageRetriesProductGallery() {
         XCTAssertTrue(
             SableMangaBakaStorefrontDiscovery

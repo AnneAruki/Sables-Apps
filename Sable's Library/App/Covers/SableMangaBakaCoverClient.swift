@@ -5756,7 +5756,9 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                         for: candidate,
                         acceptsSquareArtwork: coverType == "audiobook",
                         acceptsAnyArtworkShape: trustsSelectedSeriesIdentity,
-                        loadsAmazonProductGallery: loadsGalleryInitially
+                        loadsAmazonProductGallery: loadsGalleryInitially,
+                        trustsProviderImageMetadata:
+                            provider.usesBigBookCoversAPI
                     )
                     guard Self.shouldRetryAmazonProductGallery(
                         provider: provider,
@@ -5771,7 +5773,8 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                         for: candidate,
                         acceptsSquareArtwork: coverType == "audiobook",
                         acceptsAnyArtworkShape: trustsSelectedSeriesIdentity,
-                        loadsAmazonProductGallery: true
+                        loadsAmazonProductGallery: true,
+                        trustsProviderImageMetadata: false
                     )
                     return (index, retry.accepted == nil ? initial : retry)
                 }
@@ -8202,12 +8205,15 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                     providerType: "chapter",
                     editionNote: "Chapter cover",
                     imageURL: book.coverURL,
-                    width: nil,
-                    height: nil,
-                    byteCount: nil,
+                    width: book.width,
+                    height: book.height,
+                    byteCount: book.byteCount,
                     storeURLs: [book.url].compactMap { $0 },
-                    quality: .unknown,
-                    fallbackImageURLs: book.coverFallbackURLs
+                    quality: book.coverQuality,
+                    fallbackImageURLs: book.coverFallbackURLs,
+                    sourceImageURLs: book.sourceImageURLs.isEmpty
+                        ? nil
+                        : book.sourceImageURLs
                 )
             }
     }
@@ -8248,12 +8254,15 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                     providerType: book.bookType,
                     editionNote: nil,
                     imageURL: book.coverURL,
-                    width: nil,
-                    height: nil,
-                    byteCount: nil,
+                    width: book.width,
+                    height: book.height,
+                    byteCount: book.byteCount,
                     storeURLs: [book.url].compactMap { $0 },
-                    quality: .unknown,
+                    quality: book.coverQuality,
                     fallbackImageURLs: book.coverFallbackURLs,
+                    sourceImageURLs: book.sourceImageURLs.isEmpty
+                        ? nil
+                        : book.sourceImageURLs,
                     publicationType: book.publicationType
                 )
             }
@@ -8615,7 +8624,8 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         for candidate: SableLibraryProviderCoverCandidate,
         acceptsSquareArtwork: Bool = false,
         acceptsAnyArtworkShape: Bool = false,
-        loadsAmazonProductGallery: Bool = false
+        loadsAmazonProductGallery: Bool = false,
+        trustsProviderImageMetadata: Bool = false
     ) async -> StorefrontImageInspection {
         var bestBookImage: ValidatedStorefrontImage?
         var bestRejectedDimensions: (width: Int, height: Int)?
@@ -8643,15 +8653,25 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         var resolvedChoiceURLs: [String] = []
         var inspectedMaximumURLs: [String: ValidatedStorefrontImage] = [:]
         var failedMaximumURLs = Set<String>()
+        let usesTrustedProviderImage =
+            trustsProviderImageMetadata
+                && Self.providerImageMetadataIsUsable(
+                    for: candidate,
+                    acceptsSquareArtwork: acceptsSquareArtwork,
+                    acceptsAnyArtworkShape: acceptsAnyArtworkShape
+                )
 
         for sourceURL in candidateURLs
         where seenURLs.insert(sourceURL).inserted {
             var bestSourceImage: ValidatedStorefrontImage?
-            let inspectedURLs = Self.usesLocalMaximumImageResolution(
-                for: sourceURL
-            )
-                ? Self.maximumImageURLCandidates(from: sourceURL)
-                : [sourceURL]
+            let inspectedURLs: [String]
+            if usesTrustedProviderImage {
+                inspectedURLs = [sourceURL]
+            } else if Self.usesLocalMaximumImageResolution(for: sourceURL) {
+                inspectedURLs = Self.maximumImageURLCandidates(from: sourceURL)
+            } else {
+                inspectedURLs = [sourceURL]
+            }
             for maximumURL in inspectedURLs {
                 let image: ValidatedStorefrontImage
                 if let inspected = inspectedMaximumURLs[maximumURL] {
@@ -8718,6 +8738,36 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             ),
             bestRejectedWidth: bestRejectedDimensions?.width,
             bestRejectedHeight: bestRejectedDimensions?.height
+        )
+    }
+
+    static func providerImageMetadataIsUsable(
+        for candidate: SableLibraryProviderCoverCandidate,
+        acceptsSquareArtwork: Bool,
+        acceptsAnyArtworkShape: Bool
+    ) -> Bool {
+        guard let width = candidate.width,
+              let height = candidate.height,
+              candidate.quality == .usable
+                || candidate.quality == .highResolution else {
+            return false
+        }
+        guard storefrontImageShapeIsAccepted(
+            width: width,
+            height: height,
+            acceptsSquareArtwork: acceptsSquareArtwork,
+            acceptsAnyArtworkShape: acceptsAnyArtworkShape
+        ) else {
+            return false
+        }
+        if acceptsSquareArtwork {
+            return width >= 800
+                && height >= 800
+                && width * height >= 850_000
+        }
+        return SableLibraryCoverDownloadPlanner.coverDimensionsAreUsable(
+            width: width,
+            height: height
         )
     }
 
@@ -9234,14 +9284,15 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
               let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
             return nil
         }
+        let metadata = coverInspectionMetadata(from: data)
         return ValidatedStorefrontImage(
             url: archivalURL,
             width: width.intValue,
             height: height.intValue,
-            contentRating: "safe",
-            contentRatingWasInferred: false,
-            detectedVolumeNumbers: [],
-            detectedChapterNumbers: [],
+            contentRating: metadata.contentRating,
+            contentRatingWasInferred: metadata.contentRating != "safe",
+            detectedVolumeNumbers: metadata.volumeNumbers,
+            detectedChapterNumbers: metadata.chapterNumbers,
             visualSignature: coverVisualSignature(from: data)
         )
     }

@@ -1692,6 +1692,85 @@ final class SableLibraryMetadataFoundationTests: XCTestCase {
         XCTAssertEqual(matched[1]?.map(\.role), [.normal, .specialEdition])
     }
 
+    func testBigBookCoversBookParserPreservesImageMetadata() throws {
+        let booksJSON = Data(
+            """
+            {
+              "data": {
+                "bw-g": [
+                  {
+                    "id": "35AX739VR5J0",
+                    "seriesId": "CNT_3Y7A6PRYA270",
+                    "title": "Volume 1",
+                    "url": "https://bookwalker.com/volume/35AX739VR5J0",
+                    "cover": "https://c.roler.dev/bw-g/35AX739VR5J0/0",
+                    "coverFallbacks": [
+                      "https://c.roler.dev/bw-gr/35AX739VR5J0/0"
+                    ],
+                    "image": {
+                      "raw": {
+                        "url": "https://img.bookwalker.example/raw-volume-1.jpg",
+                        "width": 1733,
+                        "height": 2600,
+                        "size": 1600000
+                      }
+                    },
+                    "volume": {
+                      "number": 1,
+                      "type": "volume"
+                    },
+                    "bookType": "novel"
+                  }
+                ]
+              }
+            }
+            """.utf8
+        )
+
+        let books = try SableLibraryBigBookCoversClient.bookCandidates(
+            fromBooksData: booksJSON,
+            provider: .bookWalkerGlobal
+        )
+        let book = try XCTUnwrap(books.first)
+        let covers = SableLibraryProviderCandidateParser
+            .bigBookCoversCandidates(
+                from: books,
+                source: .bookWalkerGlobal,
+                language: "en",
+                mediaType: "lightNovel"
+            )
+        let cover = try XCTUnwrap(covers.first)
+
+        XCTAssertEqual(book.width, 1733)
+        XCTAssertEqual(book.height, 2600)
+        XCTAssertEqual(book.byteCount, 1600000)
+        XCTAssertEqual(book.coverQuality, .highResolution)
+        XCTAssertEqual(cover.width, 1733)
+        XCTAssertEqual(cover.height, 2600)
+        XCTAssertEqual(cover.byteCount, 1600000)
+        XCTAssertEqual(cover.quality, .highResolution)
+        XCTAssertEqual(
+            cover.fallbackImageURLs,
+            ["https://c.roler.dev/bw-gr/35AX739VR5J0/0"]
+        )
+        XCTAssertEqual(
+            book.sourceImageURLs,
+            [
+                "https://c.roler.dev/bw-g/35AX739VR5J0/0",
+                "https://img.bookwalker.example/raw-volume-1.jpg",
+                "https://c.roler.dev/bw-gr/35AX739VR5J0/0"
+            ]
+        )
+        XCTAssertEqual(
+            cover.sourceImageURLs,
+            [
+                "https://c.roler.dev/bw-g/35AX739VR5J0/0",
+                "https://img.bookwalker.example/raw-volume-1.jpg",
+                "https://c.roler.dev/bw-gr/35AX739VR5J0/0"
+            ]
+        )
+    }
+
     func testBookLiveBookIDsRestoreMissingBBCVolumeNumbers() throws {
         let booksJSON = Data(
             """
