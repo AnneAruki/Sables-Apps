@@ -114,12 +114,24 @@ nonisolated struct SableMangaBakaSeriesSummary: Codable, Sendable, Equatable, Id
 
     var displayTitle: String {
         let preferred = titles?.first(where: {
-            $0.language == "en" && ($0.isPrimary == true || $0.traits.contains("official"))
+            $0.language == "en"
+                && $0.isPrimary == true
+                && $0.traits.contains("official")
+        }) ?? titles?.first(where: {
+            $0.language == "en" && $0.isPrimary == true
+        })
+        if let preferred {
+            return preferred.title
+        }
+        if let title {
+            return title
+        }
+        let fallback = titles?.first(where: {
+            $0.language == "en" && $0.traits.contains("official")
         }) ?? titles?.first(where: { $0.language == "en" })
             ?? titles?.first(where: { $0.isPrimary == true })
             ?? titles?.first
-        return preferred?.title
-            ?? title
+        return fallback?.title
             ?? romanizedTitle
             ?? nativeTitle
             ?? "MangaBaka series \(id)"
@@ -308,12 +320,15 @@ nonisolated struct SableMangaBakaDirectCoverInspection:
     Equatable,
     Identifiable
 {
+    var sourceURL: String? = nil
     var url: String
     var width: Int
     var height: Int
+    var contentRating: String = "suggestive"
+    var contentRatingWasInferred: Bool = false
 
     var id: String {
-        SableMangaBakaCoverSnapshot.coverURLIdentity(url)
+        SableMangaBakaCoverSnapshot.coverURLIdentity(sourceURL ?? url)
     }
 }
 
@@ -900,7 +915,7 @@ nonisolated enum SableMangaBakaCoverInventoryGroup: String, CaseIterable, Sendab
 
     var title: String {
         switch self {
-        case .standardVolumes: "Standard Volumes"
+        case .standardVolumes: "Standard Covers"
         case .backCovers: "Back Covers"
         case .chapterCovers: "Chapter Covers"
         case .audiobookCovers: "Audiobooks"
@@ -1014,6 +1029,42 @@ nonisolated enum SableMangaBakaCoverInventoryGroup: String, CaseIterable, Sendab
             note.components(separatedBy: CharacterSet.alphanumerics.inverted)
                 .filter { !$0.isEmpty }
         )
+    }
+}
+
+nonisolated enum SableMangaBakaCoverSafetyAutomation {
+    static func rank(_ rating: String) -> Int {
+        switch rating.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "pornographic": 3
+        case "erotica": 2
+        case "suggestive": 1
+        default: 0
+        }
+    }
+
+    static func reviewRating(for inferredRating: String?) -> String? {
+        switch inferredRating?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "safe": "safe"
+        case "suggestive": "suggestive"
+        case "erotica", "pornographic": "suggestive"
+        default: nil
+        }
+    }
+
+    static func proposedReviewRating(
+        currentRating: String,
+        inferredRating: String?,
+        wasInferred: Bool
+    ) -> String? {
+        guard wasInferred,
+              let reviewed = reviewRating(for: inferredRating),
+              rank(reviewed) != rank(currentRating) else {
+            return nil
+        }
+        return reviewed
     }
 }
 

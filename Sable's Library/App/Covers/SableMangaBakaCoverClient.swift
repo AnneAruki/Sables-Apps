@@ -4,6 +4,7 @@
 //
 
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 #if canImport(Vision)
@@ -1065,6 +1066,35 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         var detectedVolumeNumbers: [Int]
         var detectedChapterNumbers: [Int]
         var visualSignature: [UInt8]
+        var visualFeaturePrint: [Float]
+    }
+
+    private struct CoverInspectionMetadata: Sendable {
+        var contentRating: String?
+        var volumeNumbers: [Int]
+        var chapterNumbers: [Int]
+    }
+
+    private enum CoverInspectionScope: Sendable {
+        case none
+        case visualOnly
+        case safetyOnly
+        case full
+    }
+
+    enum DirectCoverSafetyProgressPhase: Sendable {
+        case comparingArtwork
+        case checkingSafety
+    }
+
+    struct DirectCoverSafetyFingerprint: Sendable, Equatable {
+        var sourceURL: String
+        var coverType: String
+        var indexNumeric: Double
+        var width: Int
+        var height: Int
+        var visualSignature: [UInt8]
+        var visualFeaturePrint: [Float]
     }
 
     private struct StorefrontImageInspection: Sendable {
@@ -1128,6 +1158,135 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 if let removed = pages.removeValue(forKey: oldestURL) {
                     byteCount -= removed.byteCount
                 }
+            }
+        }
+    }
+
+    private actor StorefrontImageDataCache {
+        private struct Entry {
+            var data: Data
+            var byteCount: Int
+        }
+
+        private let maximumEntryCount = 80
+        private let maximumByteCount = 64 * 1_024 * 1_024
+        private var images: [String: Entry] = [:]
+        private var accessOrder: [String] = []
+        private var byteCount = 0
+
+        func data(for url: String) -> Data? {
+            guard let entry = images[url] else { return nil }
+            accessOrder.removeAll(where: { $0 == url })
+            accessOrder.append(url)
+            return entry.data
+        }
+
+        func insert(_ data: Data, for url: String) {
+            let size = data.count
+            guard size <= maximumByteCount else { return }
+            if let existing = images.removeValue(forKey: url) {
+                byteCount -= existing.byteCount
+            }
+            accessOrder.removeAll(where: { $0 == url })
+            images[url] = Entry(data: data, byteCount: size)
+            accessOrder.append(url)
+            byteCount += size
+
+            while images.count > maximumEntryCount
+                || byteCount > maximumByteCount,
+                let oldestURL = accessOrder.first {
+                accessOrder.removeFirst()
+                if let removed = images.removeValue(forKey: oldestURL) {
+                    byteCount -= removed.byteCount
+                }
+            }
+        }
+    }
+
+    private actor StorefrontImageInspectionCache {
+        private let maximumEntryCount = 4_096
+        private var metadataByDigest: [String: CoverInspectionMetadata] = [:]
+        private var accessOrder: [String] = []
+
+        func metadata(for digest: String) -> CoverInspectionMetadata? {
+            guard let metadata = metadataByDigest[digest] else { return nil }
+            accessOrder.removeAll(where: { $0 == digest })
+            accessOrder.append(digest)
+            return metadata
+        }
+
+        func insert(_ metadata: CoverInspectionMetadata, for digest: String) {
+            accessOrder.removeAll(where: { $0 == digest })
+            metadataByDigest[digest] = metadata
+            accessOrder.append(digest)
+            while metadataByDigest.count > maximumEntryCount,
+                  let oldestDigest = accessOrder.first {
+                accessOrder.removeFirst()
+                metadataByDigest.removeValue(forKey: oldestDigest)
+            }
+        }
+    }
+
+    private actor DirectCoverSafetyCache {
+        private let maximumEntryCount = 4_096
+        private var inspectionsByIdentity:
+            [String: SableMangaBakaDirectCoverInspection] = [:]
+        private var accessOrder: [String] = []
+
+        func inspection(
+            for identity: String
+        ) -> SableMangaBakaDirectCoverInspection? {
+            guard let inspection = inspectionsByIdentity[identity] else {
+                return nil
+            }
+            accessOrder.removeAll(where: { $0 == identity })
+            accessOrder.append(identity)
+            return inspection
+        }
+
+        func insert(_ inspection: SableMangaBakaDirectCoverInspection) {
+            let identity = inspection.id
+            guard !identity.isEmpty else { return }
+            accessOrder.removeAll(where: { $0 == identity })
+            inspectionsByIdentity[identity] = inspection
+            accessOrder.append(identity)
+            while inspectionsByIdentity.count > maximumEntryCount,
+                  let oldestIdentity = accessOrder.first {
+                accessOrder.removeFirst()
+                inspectionsByIdentity.removeValue(forKey: oldestIdentity)
+            }
+        }
+    }
+
+    private actor DirectCoverSafetyFingerprintCache {
+        private let maximumEntryCount = 4_096
+        private var fingerprintsByIdentity:
+            [String: DirectCoverSafetyFingerprint] = [:]
+        private var accessOrder: [String] = []
+
+        func fingerprint(
+            for identity: String
+        ) -> DirectCoverSafetyFingerprint? {
+            guard let fingerprint = fingerprintsByIdentity[identity] else {
+                return nil
+            }
+            accessOrder.removeAll(where: { $0 == identity })
+            accessOrder.append(identity)
+            return fingerprint
+        }
+
+        func insert(_ fingerprint: DirectCoverSafetyFingerprint) {
+            let identity = SableMangaBakaCoverSnapshot.coverURLIdentity(
+                fingerprint.sourceURL
+            )
+            guard !identity.isEmpty else { return }
+            accessOrder.removeAll(where: { $0 == identity })
+            fingerprintsByIdentity[identity] = fingerprint
+            accessOrder.append(identity)
+            while fingerprintsByIdentity.count > maximumEntryCount,
+                  let oldestIdentity = accessOrder.first {
+                accessOrder.removeFirst()
+                fingerprintsByIdentity.removeValue(forKey: oldestIdentity)
             }
         }
     }
@@ -1231,8 +1390,18 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         return URLSession(configuration: configuration)
     }()
     private static let storefrontPageCache = StorefrontPageCache()
+    private static let storefrontImageDataCache = StorefrontImageDataCache()
+    private static let storefrontImageInspectionCache =
+        StorefrontImageInspectionCache()
+    private static let storefrontImageSafetyInspectionCache =
+        StorefrontImageInspectionCache()
     private static let storefrontImageInspectionGate =
-        StorefrontImageInspectionGate(limit: 2)
+        StorefrontImageInspectionGate(limit: 1)
+    private static let storefrontImageSafetyInspectionGate =
+        StorefrontImageInspectionGate(limit: 1)
+    private static let directCoverSafetyCache = DirectCoverSafetyCache()
+    private static let directCoverSafetyFingerprintCache =
+        DirectCoverSafetyFingerprintCache()
 
     func discover(
         for series: SableMangaBakaSeriesSummary,
@@ -1512,12 +1681,16 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             notes.append("Storefront scan cancelled.")
         }
 
+        let presentedSuggestions = Self.presentationSuggestions(
+            from: results.flatMap(\.suggestions)
+                + publisherResult.suggestions
+                + officialPublisherResult.suggestions
+        )
+        let inspectedSuggestions = await safetyInspectedSuggestions(
+            presentedSuggestions
+        )
         return SableMangaBakaStorefrontDiscoveryResult(
-            suggestions: Self.presentationSuggestions(
-                from: results.flatMap(\.suggestions)
-                    + publisherResult.suggestions
-                    + officialPublisherResult.suggestions
-            ),
+            suggestions: inspectedSuggestions,
             notes: notes.sorted()
         )
     }
@@ -1649,8 +1822,11 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             includesAudiobooks: true,
             progress: progress
         )
+        let inspectedSuggestions = await safetyInspectedSuggestions(
+            result.suggestions
+        )
         return SableMangaBakaStorefrontDiscoveryResult(
-            suggestions: result.suggestions,
+            suggestions: inspectedSuggestions,
             notes: notes + result.notes
         )
     }
@@ -4786,6 +4962,18 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         return nil
     }
 
+    static func directCoverURL(from rawValue: String) -> String? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard storeSeriesReference(from: value) == nil,
+              let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else {
+            return nil
+        }
+        return url.absoluteString
+    }
+
     private static func amazonProvider(
         for host: String
     ) -> SableLibraryBigBookCoversProvider? {
@@ -7477,6 +7665,89 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         )
     }
 
+    static func kyoboSeriesProducts(
+        from html: String
+    ) -> [KoreanStorefrontProduct] {
+        guard let encodedJSON = kyoboHiddenInputValue(
+            id: "jsonSrisProductList",
+            in: html
+        ) else {
+            return []
+        }
+        let decodedJSON = decodedKoreanStorefrontText(encodedJSON)
+        guard let data = decodedJSON.data(using: .utf8),
+              let objects = try? JSONSerialization.jsonObject(with: data)
+                as? [[String: Any]] else {
+            return []
+        }
+
+        let rawSeriesID = kyoboHiddenInputValue(
+            id: "srisMotherCmdtid",
+            in: html
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seriesID = rawSeriesID?.isEmpty == false ? rawSeriesID : nil
+        let mediaType = kyoboMediaType(from: html)
+        var seenIDs = Set<String>()
+        return objects.compactMap { object in
+            if let productType = object["dgctSaleCmdtDvsnCode"] as? String,
+               productType != "EBK" {
+                return nil
+            }
+            guard let id = (object["saleCmdtid"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !id.isEmpty,
+                  seenIDs.insert(id).inserted,
+                  let title = (object["cmdtHnglName"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty,
+                  !title.contains("세트"),
+                  !title.contains("합본"),
+                  let barcode = (object["cverBarcd"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !barcode.isEmpty else {
+                return nil
+            }
+            let sequence = (object["arngSqnc"] as? String)
+                .flatMap(Double.init)
+                ?? (object["arngSqnc"] as? NSNumber)?.doubleValue
+                ?? koreanExactVolumeNumber(in: title)
+            guard let sequence, sequence.isFinite, sequence >= 0 else {
+                return nil
+            }
+            return KoreanStorefrontProduct(
+                id: id,
+                title: title,
+                imageURL:
+                    "https://contents.kyobobook.co.kr/sih/fit-in/3000x0/pdt/\(barcode).jpg",
+                storeURL:
+                    "https://ebook-product.kyobobook.co.kr/dig/epd/ebook/\(id)",
+                volumeNumber: sequence,
+                mediaType: mediaType,
+                seriesID: seriesID
+            )
+        }
+        .sorted {
+            if $0.volumeNumber != $1.volumeNumber {
+                return $0.volumeNumber < $1.volumeNumber
+            }
+            return $0.id < $1.id
+        }
+    }
+
+    private static func kyoboHiddenInputValue(
+        id: String,
+        in html: String
+    ) -> String? {
+        let escapedID = NSRegularExpression.escapedPattern(for: id)
+        let patterns = [
+            #"(?is)<input\b[^>]*\bvalue\s*=\s*[\"']([^\"']*)[\"'][^>]*\bid\s*=\s*[\"']\#(escapedID)[\"'][^>]*>"#,
+            #"(?is)<input\b[^>]*\bid\s*=\s*[\"']\#(escapedID)[\"'][^>]*\bvalue\s*=\s*[\"']([^\"']*)[\"'][^>]*>"#
+        ]
+        return patterns.lazy.compactMap {
+            firstPathCapture(in: html, pattern: $0)
+        }.first
+    }
+
     static func kyoboPrintProduct(
         fromSearchHTML html: String,
         productID: String,
@@ -7803,6 +8074,17 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             japaneseNativeTitle.flatMap {
                 containsJapaneseScript($0) && !$0.isEmpty ? $0 : nil
             }
+        let englishTitles = titles.filter {
+            let language = normalizedLanguageTag($0.language)
+            return language == "en" || language.hasPrefix("en-")
+        }
+        let officialEnglishTitle = englishTitles.first(where: {
+            $0.isPrimary == true && $0.traits.contains("official")
+        }) ?? englishTitles.first(where: {
+            $0.isPrimary == true
+        }) ?? englishTitles.first(where: {
+            $0.traits.contains("official")
+        }) ?? englishTitles.first
 
         let fallbacks: [String?] = wantsJapanese
             ? [
@@ -7814,9 +8096,11 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             ]
             : [
                 preferred?.title,
-                requestedLanguage == "en" ? series.title : nil,
-                series.romanizedTitle,
+                requestedLanguage == "en"
+                    ? series.title
+                    : officialEnglishTitle?.title,
                 series.title,
+                series.romanizedTitle,
                 series.nativeTitle
             ]
         return fallbacks
@@ -8354,8 +8638,24 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
             SableMangaBakaStorefrontCoverSuggestion
         ) -> Bool)? = nil
     ) -> [SableMangaBakaStorefrontCompositeSlot] {
+        compositeSlots(
+            fromPreparedSuggestions:
+                mangaBakaSubmissionSuggestions(from: suggestions),
+            selectedSuggestionIDs: selectedSuggestionIDs,
+            manualReviewEvaluator: manualReviewEvaluator
+        )
+    }
+
+    static func compositeSlots(
+        fromPreparedSuggestions suggestions:
+            [SableMangaBakaStorefrontCoverSuggestion],
+        selectedSuggestionIDs: Set<String> = [],
+        manualReviewEvaluator: ((
+            SableMangaBakaStorefrontCoverSuggestion
+        ) -> Bool)? = nil
+    ) -> [SableMangaBakaStorefrontCompositeSlot] {
         let ranked = rankedSuggestions(
-            mangaBakaSubmissionSuggestions(from: suggestions),
+            suggestions,
             manualReviewEvaluator: manualReviewEvaluator
         )
         let grouped = Dictionary(grouping: ranked) { suggestion in
@@ -9190,7 +9490,7 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                     group.addTask {
                         (
                             rawURL,
-                            await downloadedStorefrontImage(from: rawURL)
+                            await inspectedStorefrontImage(from: rawURL)
                         )
                     }
                 }
@@ -9205,14 +9505,427 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 guard let image else { continue }
                 inspectionsByURL[rawURL] =
                     SableMangaBakaDirectCoverInspection(
+                        sourceURL: rawURL,
                         url: image.url,
                         width: image.width,
-                        height: image.height
+                        height: image.height,
+                        contentRating: image.contentRating,
+                        contentRatingWasInferred:
+                            image.contentRatingWasInferred
                     )
             }
         }
 
         return urls.compactMap { inspectionsByURL[$0] }
+    }
+
+    func inspectDirectCoverSafety(
+        _ covers: [SableMangaBakaCoverImage],
+        progress: (@MainActor @Sendable (
+            _ completed: Int,
+            _ total: Int,
+            _ phase: DirectCoverSafetyProgressPhase
+        ) -> Void)? = nil
+    ) async -> [SableMangaBakaDirectCoverInspection] {
+        var seenIdentities = Set<String>()
+        let candidates = covers.compactMap {
+            cover -> (cover: SableMangaBakaCoverImage, sourceURL: String)? in
+            let sourceURL = cover.previewURL ?? cover.url
+            let identity = SableMangaBakaCoverSnapshot.coverURLIdentity(
+                sourceURL
+            )
+            guard !identity.isEmpty,
+                  seenIdentities.insert(identity).inserted else {
+                return nil
+            }
+            return (cover, sourceURL)
+        }
+        var inspectionsByURL: [
+            String: SableMangaBakaDirectCoverInspection
+        ] = [:]
+        var fingerprintsByURL: [String: DirectCoverSafetyFingerprint] = [:]
+        var completed = 0
+        await progress?(
+            completed,
+            candidates.count,
+            .comparingArtwork
+        )
+
+        for batchStart in stride(from: 0, to: candidates.count, by: 8) {
+            guard !Task.isCancelled else { break }
+            let batch = Array(
+                candidates[
+                    batchStart..<min(batchStart + 8, candidates.count)
+                ]
+            )
+            let results = await withTaskGroup(
+                of: (String, DirectCoverSafetyFingerprint?).self
+            ) { group in
+                for candidate in batch {
+                    group.addTask {
+                        let identity = SableMangaBakaCoverSnapshot
+                            .coverURLIdentity(candidate.sourceURL)
+                        if var cached = await Self
+                            .directCoverSafetyFingerprintCache.fingerprint(
+                                for: identity
+                            ) {
+                            cached.sourceURL = candidate.sourceURL
+                            cached.coverType = candidate.cover.type
+                            cached.indexNumeric = candidate.cover.indexNumeric
+                            return (candidate.sourceURL, cached)
+                        }
+                        guard let image = await downloadedStorefrontImageCandidate(
+                            from: candidate.sourceURL,
+                            inspectionScope: .visualOnly
+                        ) else {
+                            return (candidate.sourceURL, nil)
+                        }
+                        let fingerprint = DirectCoverSafetyFingerprint(
+                            sourceURL: candidate.sourceURL,
+                            coverType: candidate.cover.type,
+                            indexNumeric: candidate.cover.indexNumeric,
+                            width: image.width,
+                            height: image.height,
+                            visualSignature: image.visualSignature,
+                            visualFeaturePrint: image.visualFeaturePrint
+                        )
+                        await Self.directCoverSafetyFingerprintCache.insert(
+                            fingerprint
+                        )
+                        return (candidate.sourceURL, fingerprint)
+                    }
+                }
+                var values: [(String, DirectCoverSafetyFingerprint?)] = []
+                for await value in group {
+                    values.append(value)
+                }
+                return values
+            }
+            for (rawURL, fingerprint) in results {
+                guard let fingerprint else { continue }
+                fingerprintsByURL[rawURL] = fingerprint
+            }
+            completed += batch.count
+            await progress?(
+                completed,
+                candidates.count,
+                .comparingArtwork
+            )
+        }
+
+        let fingerprints = candidates.compactMap {
+            candidate -> DirectCoverSafetyFingerprint? in
+            fingerprintsByURL[candidate.sourceURL]
+        }
+        let failedCount = candidates.count - fingerprints.count
+        completed = failedCount
+        await progress?(
+            completed,
+            candidates.count,
+            .checkingSafety
+        )
+
+        for group in Self.directCoverSafetyGroups(from: fingerprints) {
+            guard !Task.isCancelled else { break }
+            let cachedInspections = await withTaskGroup(
+                of: SableMangaBakaDirectCoverInspection?.self
+            ) { taskGroup in
+                for fingerprint in group {
+                    taskGroup.addTask {
+                        let identity = SableMangaBakaCoverSnapshot
+                            .coverURLIdentity(fingerprint.sourceURL)
+                        return await Self.directCoverSafetyCache.inspection(
+                            for: identity
+                        )
+                    }
+                }
+                var values: [SableMangaBakaDirectCoverInspection] = []
+                for await value in taskGroup {
+                    if let value { values.append(value) }
+                }
+                return values
+            }
+            let inferredCachedInspections = cachedInspections.filter(
+                \.contentRatingWasInferred
+            )
+            let cachedRating = inferredCachedInspections.max {
+                SableMangaBakaCoverSafetyAutomation.rank(
+                    $0.contentRating
+                ) < SableMangaBakaCoverSafetyAutomation.rank(
+                    $1.contentRating
+                )
+            }?.contentRating
+            let representative = Self.directCoverSafetyRepresentative(
+                in: group
+            )
+            let inferredImage: ValidatedStorefrontImage?
+            if cachedRating == nil, let representative {
+                inferredImage = await safetyInspectedStorefrontImage(
+                    from: representative.sourceURL
+                )
+            } else {
+                inferredImage = nil
+            }
+            let resolvedRating = cachedRating
+                ?? inferredImage?.contentRating
+                ?? "safe"
+            let wasInferred = !inferredCachedInspections.isEmpty
+                || inferredImage?.contentRatingWasInferred == true
+
+            for fingerprint in group {
+                let inspection = SableMangaBakaDirectCoverInspection(
+                    sourceURL: fingerprint.sourceURL,
+                    url: fingerprint.sourceURL,
+                    width: fingerprint.width,
+                    height: fingerprint.height,
+                    contentRating: resolvedRating,
+                    contentRatingWasInferred: wasInferred
+                )
+                inspectionsByURL[fingerprint.sourceURL] = inspection
+                await Self.directCoverSafetyCache.insert(inspection)
+            }
+            completed += group.count
+            await progress?(
+                completed,
+                candidates.count,
+                .checkingSafety
+            )
+        }
+
+        return candidates.compactMap { inspectionsByURL[$0.sourceURL] }
+    }
+
+    static func directCoverSafetyGroups(
+        from fingerprints: [DirectCoverSafetyFingerprint]
+    ) -> [[DirectCoverSafetyFingerprint]] {
+        var fingerprintsBySlot: [String: [DirectCoverSafetyFingerprint]] = [:]
+        for fingerprint in fingerprints {
+            let normalizedType = fingerprint.coverType
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let slot: String
+            if fingerprint.indexNumeric.isFinite,
+               fingerprint.indexNumeric > 0 {
+                slot = "\(normalizedType):\(String(format: "%.6f", fingerprint.indexNumeric))"
+            } else {
+                slot = "\(normalizedType):url:\(fingerprint.sourceURL)"
+            }
+            fingerprintsBySlot[slot, default: []].append(fingerprint)
+        }
+
+        var result: [[DirectCoverSafetyFingerprint]] = []
+        for slot in fingerprintsBySlot.keys.sorted() {
+            guard let slotFingerprints = fingerprintsBySlot[slot] else {
+                continue
+            }
+            var slotGroups: [[DirectCoverSafetyFingerprint]] = []
+            for fingerprint in slotFingerprints.sorted(by: {
+                $0.sourceURL < $1.sourceURL
+            }) {
+                if let index = slotGroups.firstIndex(where: { group in
+                    group.contains {
+                        directCoverSafetyFingerprintsAreSimilar(
+                            $0,
+                            fingerprint
+                        )
+                    }
+                }) {
+                    slotGroups[index].append(fingerprint)
+                } else {
+                    slotGroups.append([fingerprint])
+                }
+            }
+            result.append(contentsOf: slotGroups)
+        }
+        return result
+    }
+
+    static func directCoverSafetyFingerprintsAreSimilar(
+        _ lhs: DirectCoverSafetyFingerprint,
+        _ rhs: DirectCoverSafetyFingerprint
+    ) -> Bool {
+        visualSignaturesAreEquivalent(
+            lhs.visualSignature,
+            rhs.visualSignature
+        ) || visualFeaturePrintDistance(
+            lhs.visualFeaturePrint,
+            rhs.visualFeaturePrint
+        ).map { $0 <= 0.72 } == true
+    }
+
+    private static func directCoverSafetyRepresentative(
+        in group: [DirectCoverSafetyFingerprint]
+    ) -> DirectCoverSafetyFingerprint? {
+        group.min { lhs, rhs in
+            let lhsDistance = group.compactMap {
+                visualFeaturePrintDistance(
+                    lhs.visualFeaturePrint,
+                    $0.visualFeaturePrint
+                )
+            }.reduce(0, +)
+            let rhsDistance = group.compactMap {
+                visualFeaturePrintDistance(
+                    rhs.visualFeaturePrint,
+                    $0.visualFeaturePrint
+                )
+            }.reduce(0, +)
+            if abs(lhsDistance - rhsDistance) > 0.001 {
+                return lhsDistance < rhsDistance
+            }
+            return lhs.width * lhs.height > rhs.width * rhs.height
+        }
+    }
+
+    static func visualFeaturePrintDistance(
+        _ lhs: [Float],
+        _ rhs: [Float]
+    ) -> Double? {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return nil }
+        let squaredDistance = zip(lhs, rhs).reduce(0.0) {
+            let difference = Double($1.0 - $1.1)
+            return $0 + difference * difference
+        }
+        return sqrt(squaredDistance)
+    }
+
+    private func safetyInspectedSuggestions(
+        _ suggestions: [SableMangaBakaStorefrontCoverSuggestion]
+    ) async -> [SableMangaBakaStorefrontCoverSuggestion] {
+        var inspected = suggestions
+        var indexesByImageIdentity: [String: [Int]] = [:]
+        var representativeURLByIdentity: [String: String] = [:]
+
+        for index in inspected.indices {
+            let identity = SableMangaBakaCoverSnapshot.coverURLIdentity(
+                inspected[index].imageURL
+            )
+            guard !identity.isEmpty else {
+                continue
+            }
+            indexesByImageIdentity[identity, default: []].append(index)
+        }
+
+        // Scan one representative for each final artwork family. Provider
+        // alternatives stay available, and localized copies of the same art
+        // share a safety result without replacing one another's image URL.
+        let finalWinners = Self.compositeSlots(from: inspected).map(\.winner)
+        let scanWinners = Self.safetyInspectionRepresentatives(from: inspected)
+        var finalIdentitiesByScanIdentity: [String: [String]] = [:]
+        for winner in finalWinners {
+            let finalIdentity = SableMangaBakaCoverSnapshot.coverURLIdentity(
+                winner.imageURL
+            )
+            guard !finalIdentity.isEmpty else { continue }
+            let representative = scanWinners.first {
+                $0.id == winner.id
+                    || Self.visualSignaturesAreEquivalent(
+                        $0.visualSignature,
+                        winner.visualSignature
+                    )
+            } ?? winner
+            let scanIdentity = SableMangaBakaCoverSnapshot.coverURLIdentity(
+                representative.imageURL
+            )
+            guard !scanIdentity.isEmpty else { continue }
+            representativeURLByIdentity[scanIdentity] = representative.imageURL
+            finalIdentitiesByScanIdentity[scanIdentity, default: []]
+                .append(finalIdentity)
+        }
+
+        let identities = representativeURLByIdentity.keys.sorted()
+        for batchStart in stride(from: 0, to: identities.count, by: 4) {
+            guard !Task.isCancelled else { break }
+            let batch = Array(
+                identities[
+                    batchStart..<min(batchStart + 4, identities.count)
+                ]
+            )
+            let results = await withTaskGroup(
+                of: (String, ValidatedStorefrontImage?).self
+            ) { group in
+                for identity in batch {
+                    guard let rawURL = representativeURLByIdentity[identity]
+                    else { continue }
+                    group.addTask {
+                        (
+                            identity,
+                            await inspectedStorefrontImage(from: rawURL)
+                        )
+                    }
+                }
+                var values: [(String, ValidatedStorefrontImage?)] = []
+                for await value in group {
+                    values.append(value)
+                }
+                return values
+            }
+
+            for (scanIdentity, image) in results {
+                for finalIdentity in finalIdentitiesByScanIdentity[
+                    scanIdentity
+                ] ?? [] {
+                    for index in indexesByImageIdentity[finalIdentity] ?? [] {
+                        guard let image else {
+                            continue
+                        }
+                        if image.contentRatingWasInferred {
+                            inspected[index].contentRating = image.contentRating
+                            inspected[index].contentRatingWasInferred = true
+                        }
+                        guard finalIdentity == scanIdentity else { continue }
+                        inspected[index].imageURL = image.url
+                        inspected[index].width = image.width
+                        inspected[index].height = image.height
+                        inspected[index].detectedVolumeNumbers =
+                            image.detectedVolumeNumbers
+                        inspected[index].detectedChapterNumbers =
+                            image.detectedChapterNumbers
+                        inspected[index].visualSignature = image.visualSignature
+                    }
+                }
+            }
+        }
+
+        return inspected
+    }
+
+    static func safetyInspectionRepresentatives(
+        from suggestions: [SableMangaBakaStorefrontCoverSuggestion]
+    ) -> [SableMangaBakaStorefrontCoverSuggestion] {
+        var representatives: [SableMangaBakaStorefrontCoverSuggestion] = []
+        for winner in compositeSlots(from: suggestions).map(\.winner) {
+            if representatives.contains(where: {
+                visualSignaturesAreEquivalent(
+                    $0.visualSignature,
+                    winner.visualSignature
+                )
+            }) {
+                continue
+            }
+            representatives.append(winner)
+        }
+        return representatives
+    }
+
+    private func inspectedStorefrontImage(
+        from rawURL: String
+    ) async -> ValidatedStorefrontImage? {
+        guard let best = await downloadedStorefrontImage(from: rawURL) else {
+            return nil
+        }
+        return await downloadedStorefrontImageCandidate(
+            from: best.url,
+            inspectionScope: .full
+        )
+    }
+
+    private func safetyInspectedStorefrontImage(
+        from rawURL: String
+    ) async -> ValidatedStorefrontImage? {
+        await downloadedStorefrontImageCandidate(
+            from: rawURL,
+            inspectionScope: .safetyOnly
+        )
     }
 
     private func downloadedStorefrontImage(
@@ -9235,43 +9948,100 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
     }
 
     private func downloadedStorefrontImageCandidate(
-        from rawURL: String
+        from rawURL: String,
+        inspectionScope: CoverInspectionScope = .none
     ) async -> ValidatedStorefrontImage? {
         guard let url = URL(string: rawURL) else { return nil }
-        var request = URLRequest(url: url)
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue(
-            "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            forHTTPHeaderField: "Accept"
-        )
+        let data: Data
+        if let cachedData = await Self.storefrontImageDataCache.data(
+            for: rawURL
+        ) {
+            data = cachedData
+        } else {
+            var request = URLRequest(url: url)
+            request.setValue(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                forHTTPHeaderField: "User-Agent"
+            )
+            request.setValue(
+                "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                forHTTPHeaderField: "Accept"
+            )
 
-        guard let (data, response) = try? await Self.imageSession.data(for: request),
-              data.count <= 25 * 1_024 * 1_024,
-              (response as? HTTPURLResponse).map({
-                  (200..<300).contains($0.statusCode)
-              }) != false else {
-            return nil
+            guard let (downloadedData, response) = try? await Self.imageSession
+                .data(for: request),
+                  downloadedData.count <= 25 * 1_024 * 1_024,
+                  (response as? HTTPURLResponse).map({
+                      (200..<300).contains($0.statusCode)
+                  }) != false else {
+                return nil
+            }
+            data = downloadedData
+            await Self.storefrontImageDataCache.insert(data, for: rawURL)
         }
 
-        await Self.storefrontImageInspectionGate.acquire()
-        guard !Task.isCancelled else {
-            await Self.storefrontImageInspectionGate.release()
-            return nil
+        let metadata: CoverInspectionMetadata?
+        switch inspectionScope {
+        case .none, .visualOnly:
+            metadata = nil
+        case .safetyOnly:
+            let digest = Self.imageInspectionDigest(for: data)
+            if let cachedMetadata = await Self.storefrontImageInspectionCache
+                .metadata(for: digest) {
+                metadata = cachedMetadata
+            } else if let cachedMetadata = await Self
+                .storefrontImageSafetyInspectionCache.metadata(for: digest) {
+                metadata = cachedMetadata
+            } else {
+                await Self.storefrontImageSafetyInspectionGate.acquire()
+                guard !Task.isCancelled else {
+                    await Self.storefrontImageSafetyInspectionGate.release()
+                    return nil
+                }
+                let inspectedMetadata = Self.coverSafetyInspectionMetadata(
+                    from: data
+                )
+                await Self.storefrontImageSafetyInspectionCache.insert(
+                    inspectedMetadata,
+                    for: digest
+                )
+                await Self.storefrontImageSafetyInspectionGate.release()
+                metadata = inspectedMetadata
+            }
+        case .full:
+            let digest = Self.imageInspectionDigest(for: data)
+            if let cachedMetadata = await Self.storefrontImageInspectionCache
+                .metadata(for: digest) {
+                metadata = cachedMetadata
+            } else {
+                await Self.storefrontImageInspectionGate.acquire()
+                guard !Task.isCancelled else {
+                    await Self.storefrontImageInspectionGate.release()
+                    return nil
+                }
+                let inspectedMetadata = Self.coverInspectionMetadata(from: data)
+                await Self.storefrontImageInspectionCache.insert(
+                    inspectedMetadata,
+                    for: digest
+                )
+                await Self.storefrontImageInspectionGate.release()
+                metadata = inspectedMetadata
+            }
         }
         let validated = Self.validatedStorefrontImage(
             from: data,
-            archivalURL: rawURL
+            archivalURL: rawURL,
+            inspectionMetadata: metadata,
+            includesVisualFeaturePrint: inspectionScope == .visualOnly
         )
-        await Self.storefrontImageInspectionGate.release()
         return validated
     }
 
     private static func validatedStorefrontImage(
         from data: Data,
-        archivalURL: String
+        archivalURL: String,
+        inspectionMetadata: CoverInspectionMetadata?,
+        includesVisualFeaturePrint: Bool
     ) -> ValidatedStorefrontImage? {
         guard
               let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -9284,17 +10054,25 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
               let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
             return nil
         }
-        let metadata = coverInspectionMetadata(from: data)
         return ValidatedStorefrontImage(
             url: archivalURL,
             width: width.intValue,
             height: height.intValue,
-            contentRating: metadata.contentRating,
-            contentRatingWasInferred: metadata.contentRating != "safe",
-            detectedVolumeNumbers: metadata.volumeNumbers,
-            detectedChapterNumbers: metadata.chapterNumbers,
-            visualSignature: coverVisualSignature(from: data)
+            contentRating: inspectionMetadata?.contentRating ?? "safe",
+            contentRatingWasInferred:
+                inspectionMetadata?.contentRating != nil,
+            detectedVolumeNumbers: inspectionMetadata?.volumeNumbers ?? [],
+            detectedChapterNumbers: inspectionMetadata?.chapterNumbers ?? [],
+            visualSignature: coverVisualSignature(from: data),
+            visualFeaturePrint: includesVisualFeaturePrint
+                ? coverVisualFeaturePrint(from: data)
+                : []
         )
+    }
+
+    private static func imageInspectionDigest(for data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }
+            .joined()
     }
 
     static func archivalStorefrontImageURL(from rawURL: String) -> String {
@@ -9572,45 +10350,72 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         return rendered ? rgba : []
     }
 
+    private static func coverVisualFeaturePrint(from data: Data) -> [Float] {
+        #if canImport(Vision)
+        guard let image = coverInspectionWorkingImage(
+            from: data,
+            maximumPixelSize: 512
+        ) else {
+            return []
+        }
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        guard (try? handler.perform([request])) != nil,
+              let observation = request.results?.first
+                as? VNFeaturePrintObservation,
+              observation.elementType == .float else {
+            return []
+        }
+        return observation.data.withUnsafeBytes {
+            Array($0.bindMemory(to: Float.self))
+        }
+        #else
+        return []
+        #endif
+    }
+
     private static func coverInspectionMetadata(
         from data: Data
-    ) -> (
-        contentRating: String,
-        volumeNumbers: [Int],
-        chapterNumbers: [Int]
-    ) {
+    ) -> CoverInspectionMetadata {
         #if canImport(Vision)
         var recognizedText = ""
-        let textRequest = VNRecognizeTextRequest()
-        textRequest.recognitionLevel = .fast
-        textRequest.usesLanguageCorrection = false
-        let textHandler = VNImageRequestHandler(data: data, options: [:])
-        if (try? textHandler.perform([textRequest])) != nil {
-            recognizedText = (textRequest.results ?? [])
-                .compactMap { $0.topCandidates(1).first?.string }
-                .joined(separator: " ")
-        }
-
-        var classifications: [String] = []
-        if #available(macOS 12.0, *) {
-            let classificationRequest = VNClassifyImageRequest()
-            let classificationHandler = VNImageRequestHandler(
-                data: data,
+        if let textImage = coverInspectionWorkingImage(
+            from: data,
+            maximumPixelSize: 1_600
+        ) {
+            let textRequest = VNRecognizeTextRequest()
+            textRequest.recognitionLevel = .fast
+            textRequest.usesLanguageCorrection = false
+            let textHandler = VNImageRequestHandler(
+                cgImage: textImage,
                 options: [:]
             )
-            if (try? classificationHandler.perform(
-                [classificationRequest]
-            )) != nil {
-                classifications = (classificationRequest.results ?? [])
-                    .filter { $0.confidence >= 0.12 }
-                    .map(\.identifier)
+            if (try? textHandler.perform([textRequest])) != nil {
+                recognizedText = (textRequest.results ?? [])
+                    .compactMap { $0.topCandidates(1).first?.string }
+                    .joined(separator: " ")
             }
         }
 
-        return (
-            contentRating: inferredCoverContentRating(
-                from: classifications
-            ),
+        let humanContentRating = SableCoverSafetyHumanMemory.shared.rating(
+            for: data
+        )
+        var modelContentRating: String?
+        if humanContentRating == nil,
+           #available(macOS 12.0, *),
+           let classificationImage = coverInspectionWorkingImage(
+            from: data,
+            maximumPixelSize: 512
+           ) {
+            modelContentRating = SableCoverSafetyVisionClassifier.shared
+                .contentRating(for: classificationImage)
+        }
+
+        return CoverInspectionMetadata(
+            contentRating: humanContentRating
+                ?? SableMangaBakaCoverSafetyAutomation.reviewRating(
+                    for: modelContentRating
+                ),
             volumeNumbers: SableLibraryAppleBooksCompatibilityRepairer
                 .explicitCoverVolumeNumbers(in: recognizedText)
                 .sorted(),
@@ -9618,8 +10423,73 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                 .sorted()
         )
         #else
-        return ("safe", [], [])
+        return CoverInspectionMetadata(
+            contentRating: nil,
+            volumeNumbers: [],
+            chapterNumbers: []
+        )
         #endif
+    }
+
+    private static func coverSafetyInspectionMetadata(
+        from data: Data
+    ) -> CoverInspectionMetadata {
+        #if canImport(Vision)
+        let contentRating: String?
+        if let humanRating = SableCoverSafetyHumanMemory.shared.rating(
+            for: data
+        ) {
+            contentRating = humanRating
+        } else if #available(macOS 12.0, *),
+           let image = coverInspectionWorkingImage(
+            from: data,
+            maximumPixelSize: 512
+           ) {
+            contentRating = SableMangaBakaCoverSafetyAutomation.reviewRating(
+                for: SableCoverSafetyVisionClassifier.shared
+                    .contentRating(for: image)
+            )
+        } else {
+            contentRating = nil
+        }
+        return CoverInspectionMetadata(
+            contentRating: contentRating,
+            volumeNumbers: [],
+            chapterNumbers: []
+        )
+        #else
+        return CoverInspectionMetadata(
+            contentRating: nil,
+            volumeNumbers: [],
+            chapterNumbers: []
+        )
+        #endif
+    }
+
+    private static func coverInspectionWorkingImage(
+        from data: Data,
+        maximumPixelSize: Int
+    ) -> CGImage? {
+        let sourceOptions = [
+            kCGImageSourceShouldCache: false
+        ] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(
+            data as CFData,
+            sourceOptions
+        ) else {
+            return nil
+        }
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize
+        ] as CFDictionary
+        return CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            thumbnailOptions
+        )
     }
 
     static func inferredCoverContentRating(
@@ -9642,7 +10512,8 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
 
         let eroticaMarkers = [
             "nudity", "nude", "topless", "bottomless", "bare breast",
-            "buttocks"
+            "buttocks", "bondage", "bdsm", "sexual restraint",
+            "rope restraint", "bondage gear"
         ]
         if labels.contains(where: { label in
             eroticaMarkers.contains(where: label.contains)
@@ -9652,13 +10523,15 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
 
         let suggestiveMarkers = [
             "lingerie", "underwear", "bikini", "swimsuit", "swimwear",
-            "cleavage", "provocative pose", "implied nudity"
+            "cleavage", "brassiere", "thong", "transparent clothing",
+            "see through clothing", "provocative pose", "implied nudity"
         ]
         if labels.contains(where: { label in
             suggestiveMarkers.contains(where: label.contains)
         }) {
             return "suggestive"
         }
+
         return "safe"
     }
 
@@ -10283,19 +11156,20 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
 
         if reference.provider == .kyobo {
             guard reference.itemType == "book",
-                  let product = await kyoboExactProduct(
-                    for: reference
-                  ) else {
+                  !Task.isCancelled else {
                 return nil
             }
+            let products = await kyoboExactProducts(for: reference)
+            guard let firstProduct = products.first else { return nil }
+            let providerSeriesID = firstProduct.seriesID ?? reference.itemID
             return (
-                product.title,
-                reference.itemID,
-                [
+                firstProduct.title,
+                providerSeriesID,
+                products.enumerated().map { offset, product in
                     SableLibraryBigBookCoversBookCandidate(
                         provider: .kyobo,
                         id: product.id,
-                        seriesID: reference.itemID,
+                        seriesID: product.seriesID ?? providerSeriesID,
                         title: product.title,
                         url: product.storeURL,
                         coverURL: product.imageURL,
@@ -10304,13 +11178,16 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
                         volumeType: "volume",
                         sequenceIndex: max(
                             1,
-                            Int(product.volumeNumber.rounded())
+                            max(
+                                Int(product.volumeNumber.rounded()),
+                                offset + 1
+                            )
                         ),
                         bookType: product.mediaType,
                         publicationType:
                             reference.publicationTypeOverride
                     )
-                ]
+                }
             )
         }
 
@@ -10539,25 +11416,30 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
         return nil
     }
 
-    private func kyoboExactProduct(
+    private func kyoboExactProducts(
         for reference: StoreSeriesReference
-    ) async -> KoreanStorefrontProduct? {
+    ) async -> [KoreanStorefrontProduct] {
         if let html = await Self.storefrontPageHTML(
             from: reference.url
-        ),
-        let product = Self.kyoboProduct(
-            from: html,
-            productID: reference.itemID,
-            storeURL: reference.url
         ) {
-            return product
+            let seriesProducts = Self.kyoboSeriesProducts(from: html)
+            if !seriesProducts.isEmpty {
+                return seriesProducts
+            }
+            if let product = Self.kyoboProduct(
+                from: html,
+                productID: reference.itemID,
+                storeURL: reference.url
+            ) {
+                return [product]
+            }
         }
 
         guard reference.itemID.uppercased().hasPrefix("S"),
               var components = URLComponents(
                 string: "https://search.kyobobook.co.kr/search"
               ) else {
-            return nil
+            return []
         }
         components.queryItems = [
             URLQueryItem(name: "keyword", value: reference.itemID),
@@ -10568,13 +11450,13 @@ nonisolated struct SableMangaBakaStorefrontDiscovery: Sendable {
               let html = await Self.storefrontPageHTML(
                 from: searchURL.absoluteString
               ) else {
-            return nil
+            return []
         }
         return Self.kyoboPrintProduct(
             fromSearchHTML: html,
             productID: reference.itemID,
             storeURL: reference.url
-        )
+        ).map { [$0] } ?? []
     }
 
     private static func amazonTitleIsMultiBookCollection(

@@ -3,6 +3,7 @@
 //  Sable's LibraryTests
 //
 
+import CoreGraphics
 import Foundation
 import XCTest
 @testable import Sable_s_Library
@@ -22,6 +23,40 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
             54536
         )
         XCTAssertNil(SableMangaBakaCoverClient.seriesID(from: "Sugar Apple Fairy Tale"))
+    }
+
+    func testDisplayTitlePrefersPrimaryOfficialEnglishTitle() {
+        let series = SableMangaBakaSeriesSummary(
+            id: 606,
+            title: "Witches Can’t Be Collared",
+            nativeTitle: "魔女に首輪は付けられない",
+            romanizedTitle: "Majo ni Kubiwa wa Tsukerarenai",
+            titles: [
+                SableMangaBakaSeriesTitle(
+                    language: "en",
+                    traits: ["official"],
+                    title: "Collars Can't Be Put on Witches",
+                    isPrimary: false
+                ),
+                SableMangaBakaSeriesTitle(
+                    language: "en",
+                    traits: ["official"],
+                    title: "Can't Be Put Collars on Witches.",
+                    isPrimary: false
+                ),
+                SableMangaBakaSeriesTitle(
+                    language: "en",
+                    traits: ["official"],
+                    title: "Witches Can’t Be Collared",
+                    isPrimary: true
+                )
+            ],
+            type: "manga",
+            cover: nil,
+            finalVolume: "2"
+        )
+
+        XCTAssertEqual(series.displayTitle, "Witches Can’t Be Collared")
     }
 
     func testSnapshotNormalizationKeepsExactlyOneDefaultAndOwningSeries() {
@@ -252,6 +287,221 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(special.inventoryItemLabel, "Special / Alternative 2")
     }
 
+    func testAutomaticCoverSafetyCapsHighSeverityPredictionsForReview() {
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.reviewRating(for: "safe"),
+            "safe"
+        )
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.reviewRating(
+                for: "suggestive"
+            ),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.reviewRating(for: "erotica"),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.reviewRating(
+                for: "pornographic"
+            ),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.reviewRating(for: nil),
+            nil
+        )
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.reviewRating(for: "unknown"),
+            nil
+        )
+    }
+
+    func testHumanCoverSafetyMemoryUsesExactCoverJudgments() {
+        let memory = SableCoverSafetyHumanMemory.shared
+
+        XCTAssertEqual(
+            memory.rating(seriesID: 377, imageID: 13),
+            "safe"
+        )
+        XCTAssertEqual(
+            memory.rating(seriesID: 377, imageID: 82),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            memory.rating(seriesID: 1_576, imageID: 67_115),
+            "erotica"
+        )
+        XCTAssertEqual(
+            memory.rating(seriesID: 590_438, imageID: 120_583),
+            "pornographic"
+        )
+        XCTAssertNil(memory.rating(seriesID: 377, imageID: 999_999))
+    }
+
+    func testHumanCoverSafetyMemoryIncludesReviewedOnePunchManCovers() {
+        let memory = SableCoverSafetyHumanMemory.shared
+
+        XCTAssertEqual(memory.rating(seriesID: 725, imageID: 2_006), "safe")
+        XCTAssertEqual(memory.rating(seriesID: 725, imageID: 1_287), "safe")
+        XCTAssertEqual(
+            memory.rating(seriesID: 725, imageID: 75_871),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            memory.rating(
+                seriesID: 725,
+                language: "ja",
+                type: "volume_back",
+                indexNumeric: 21
+            ),
+            "suggestive"
+        )
+    }
+
+    func testHumanCoverSafetyMemoryPersistsLocalRatingCorrections() {
+        let suiteName = "SableCoverSafetyHumanMemoryTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let memory = SableCoverSafetyHumanMemory(defaults: defaults)
+        memory.record(
+            seriesID: 725,
+            imageID: 75_872,
+            sourceURL: "https://images.example.test/back-21",
+            language: "ja",
+            type: "volume_back",
+            indexNumeric: 21,
+            rating: "suggestive"
+        )
+
+        let restored = SableCoverSafetyHumanMemory(defaults: defaults)
+        XCTAssertEqual(
+            restored.rating(seriesID: 725, imageID: 75_872),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            restored.rating(
+                seriesID: 725,
+                language: "jp",
+                type: "back_cover",
+                indexNumeric: 21
+            ),
+            "suggestive"
+        )
+    }
+
+    func testSafetyCorrectionKeepsTheAffectedCoverIdentity() {
+        var affectedCover = SableMangaBakaCoverImage(
+            id: 42,
+            seriesID: 725,
+            url: "https://example.com/one-punch-man-1.jpg",
+            index: "1",
+            indexNumeric: 1,
+            language: "en",
+            contentRating: "safe"
+        )
+        let correction = SableMangaBakaCoverSafetyCorrection(
+            cover: affectedCover,
+            originalRating: "safe",
+            proposedRating: "suggestive"
+        )
+
+        XCTAssertEqual(correction.inventoryGroup, .standardVolumes)
+        XCTAssertEqual(correction.language, "en")
+        affectedCover.contentRating = "suggestive"
+        XCTAssertTrue(correction.matches(affectedCover))
+
+        affectedCover.id = 43
+        XCTAssertFalse(correction.matches(affectedCover))
+    }
+
+    func testVisionSafetyDefaultsLowUnlessRaiseIsHighConfidence() {
+        XCTAssertEqual(
+            SableCoverSafetyVisionClassifier.reviewedContentRating(
+                for: .init(rating: "safe", confidence: 0.20)
+            ),
+            "safe"
+        )
+        XCTAssertEqual(
+            SableCoverSafetyVisionClassifier.reviewedContentRating(
+                for: .init(rating: "suggestive", confidence: 0.89)
+            ),
+            "safe"
+        )
+        XCTAssertEqual(
+            SableCoverSafetyVisionClassifier.reviewedContentRating(
+                for: .init(rating: "suggestive", confidence: 0.90)
+            ),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            SableCoverSafetyVisionClassifier.reviewedContentRating(
+                for: .init(rating: "pornographic", confidence: 0.99)
+            ),
+            "suggestive"
+        )
+    }
+
+    func testVisionSafetyModelIsBundledAndRunnable() throws {
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil,
+                width: 8,
+                height: 8,
+                bitsPerComponent: 8,
+                bytesPerRow: 32,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        )
+        context.setFillColor(CGColor(gray: 0.5, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        let image = try XCTUnwrap(context.makeImage())
+        let prediction = try XCTUnwrap(
+            SableCoverSafetyVisionClassifier.shared.prediction(for: image)
+        )
+
+        XCTAssertTrue(
+            ["safe", "suggestive", "erotica", "pornographic"]
+                .contains(prediction.rating)
+        )
+    }
+
+    func testAutomaticCoverSafetyPreparesUpwardAndDownwardReviewChanges() {
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.proposedReviewRating(
+                currentRating: "suggestive",
+                inferredRating: "safe",
+                wasInferred: true
+            ),
+            "safe"
+        )
+        XCTAssertEqual(
+            SableMangaBakaCoverSafetyAutomation.proposedReviewRating(
+                currentRating: "safe",
+                inferredRating: "erotica",
+                wasInferred: true
+            ),
+            "suggestive"
+        )
+        XCTAssertNil(
+            SableMangaBakaCoverSafetyAutomation.proposedReviewRating(
+                currentRating: "suggestive",
+                inferredRating: "safe",
+                wasInferred: false
+            )
+        )
+        XCTAssertNil(
+            SableMangaBakaCoverSafetyAutomation.proposedReviewRating(
+                currentRating: "safe",
+                inferredRating: nil,
+                wasInferred: true
+            )
+        )
+    }
+
     @MainActor
     func testLiveOnlyChapterRemainsVisibleWithoutJoiningEditableDraft() {
         let store = SableMangaBakaCoverStudioStore()
@@ -302,6 +552,59 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(store.coverInventoryFilteredTotalCount, 1)
         XCTAssertEqual(store.coverInventoryCount(in: .standardVolumes), 1)
         XCTAssertEqual(store.coverInventoryCount(in: .chapterCovers), 0)
+    }
+
+    @MainActor
+    func testCoverInventoryGroupsEachTypeByLanguage() {
+        let store = SableMangaBakaCoverStudioStore()
+        store.draftImages = [
+            cover(
+                url: "https://example.com/volume-ja.jpg",
+                index: 1,
+                isDefault: true,
+                language: "ja"
+            ),
+            cover(
+                url: "https://example.com/volume-en.jpg",
+                index: 1,
+                isDefault: false,
+                language: "en"
+            ),
+            cover(
+                url: "https://example.com/back-en.jpg",
+                index: 1,
+                isDefault: false,
+                language: "en",
+                type: "volume_back"
+            )
+        ]
+
+        XCTAssertEqual(
+            store.coverInventoryLanguageCodes(in: .standardVolumes),
+            ["ja", "en"]
+        )
+        XCTAssertEqual(
+            store.coverInventoryCount(in: .standardVolumes, language: "ja"),
+            1
+        )
+        XCTAssertEqual(
+            store.coverInventoryCount(in: .standardVolumes, language: "en"),
+            1
+        )
+        XCTAssertEqual(
+            store.coverInventoryCount(in: .backCovers, language: "en"),
+            1
+        )
+
+        store.coverInventoryLanguage = "en"
+        XCTAssertEqual(
+            store.coverInventoryLanguageCodes(in: .standardVolumes),
+            ["en"]
+        )
+        XCTAssertEqual(
+            store.coverInventoryLanguageCodes(in: .backCovers),
+            ["en"]
+        )
     }
 
     @MainActor
@@ -2302,6 +2605,46 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
     }
 
+    func testRegionalAmazonFallsBackToOfficialEnglishBeforeRomanizedTitle() {
+        let series = SableMangaBakaSeriesSummary(
+            id: 606,
+            title: "Witches Can't Be Collared",
+            nativeTitle: "魔女に首輪は付けられない",
+            romanizedTitle: "Majo ni Kubiwa wa Tsukerarenai",
+            titles: [
+                SableMangaBakaSeriesTitle(
+                    language: "en",
+                    traits: ["official"],
+                    title: "Witches Can't Be Collared",
+                    isPrimary: true
+                ),
+                SableMangaBakaSeriesTitle(
+                    language: "ja",
+                    traits: ["native"],
+                    title: "魔女に首輪は付けられない",
+                    isPrimary: true
+                )
+            ],
+            type: "manga",
+            cover: nil
+        )
+
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery.preferredQuery(
+                for: .amazonFrance,
+                series: series
+            ),
+            "Witches Can't Be Collared"
+        )
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery.providerSearchQueries(
+                for: .amazonGermany,
+                series: series
+            ),
+            ["Witches Can't Be Collared"]
+        )
+    }
+
     func testJapaneseStorefrontPrefersKanaAlternativeOverLatinPrimary() {
         let series = SableMangaBakaSeriesSummary(
             id: 725,
@@ -3167,6 +3510,32 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(kyoboPrint?.itemType, "book")
         XCTAssertEqual(kyoboPrint?.languageOverride, "ko")
         XCTAssertNil(kyoboPrint?.publicationTypeOverride)
+    }
+
+    func testMixedExactLinkBoxRecognizesExtensionlessDirectCoverURLs() {
+        let roler =
+            "https://c.roler.dev/bw/d6d2100c-a449-4d7d-8906-0f00b604992c/0"
+        let image =
+            "https://c.bookwalker.jp/coverImage_9ea1be8915dd468f9f84442708006f75.jpg"
+
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery.directCoverURL(from: roler),
+            roler
+        )
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery.directCoverURL(from: image),
+            image
+        )
+        XCTAssertNil(
+            SableMangaBakaStorefrontDiscovery.directCoverURL(
+                from: "https://www.amazon.de/dp/3551746559"
+            )
+        )
+        XCTAssertNil(
+            SableMangaBakaStorefrontDiscovery.directCoverURL(
+                from: "not a link"
+            )
+        )
     }
 
     func testExactAmazonStoreURLsPreserveRegionalProvider() {
@@ -7843,6 +8212,20 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(
             SableMangaBakaStorefrontDiscovery
                 .inferredCoverContentRating(
+                    from: ["male swimsuit", "illustration"]
+                ),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery
+                .inferredCoverContentRating(
+                    from: ["female swimwear", "illustration"]
+                ),
+            "suggestive"
+        )
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery
+                .inferredCoverContentRating(
                     from: ["nudity", "illustration"]
                 ),
             "erotica"
@@ -7853,6 +8236,41 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
                     from: ["sexual activity"]
                 ),
             "pornographic"
+        )
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery
+                .inferredCoverContentRating(from: ["people", "document"]),
+            "safe"
+        )
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery
+                .inferredCoverContentRating(from: []),
+            "safe"
+        )
+        XCTAssertEqual(
+            SableMangaBakaStorefrontDiscovery
+                .inferredCoverContentRating(
+                    from: ["landscape", "architecture"]
+                ),
+            "safe"
+        )
+    }
+
+    @MainActor
+    func testUninspectedCoverIsNotAutomaticallySelected() {
+        let uninspected = storefrontSuggestion(
+            provider: .bookLiveJP,
+            language: "ja",
+            contentRating: "suggestive",
+            contentRatingWasInferred: false
+        )
+
+        XCTAssertTrue(
+            SableMangaBakaCoverStudioStore
+                .automaticallySelectedStorefrontSuggestions(
+                    from: [uninspected]
+                )
+                .isEmpty
         )
     }
 
@@ -8140,6 +8558,161 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         XCTAssertEqual(Set(slots.map(\.coverType)), ["volume", "chapter", "audiobook"])
     }
 
+    func testSafetyInspectionUsesOneWinnerPerFinalLanguageTypeAndNumberCard() {
+        let japaneseBookLive = storefrontSuggestion(
+            provider: .bookLiveJP,
+            language: "ja",
+            volumeNumber: 2,
+            coverType: "volume",
+            width: 1_600,
+            height: 2_400
+        )
+        let japaneseAmazon = storefrontSuggestion(
+            provider: .amazonJP,
+            language: "ja",
+            volumeNumber: 2,
+            coverType: "volume",
+            width: 1_400,
+            height: 2_000
+        )
+        let englishVolume = storefrontSuggestion(
+            provider: .amazon,
+            language: "en",
+            volumeNumber: 2,
+            coverType: "volume"
+        )
+        let japaneseChapter = storefrontSuggestion(
+            provider: .bookWalkerJP,
+            language: "ja",
+            volumeNumber: 2,
+            coverType: "chapter"
+        )
+
+        let representatives = SableMangaBakaStorefrontDiscovery
+            .safetyInspectionRepresentatives(
+                from: [
+                    japaneseAmazon,
+                    japaneseBookLive,
+                    englishVolume,
+                    japaneseChapter
+                ]
+            )
+
+        XCTAssertEqual(representatives.count, 3)
+        XCTAssertTrue(representatives.contains { $0.id == japaneseBookLive.id })
+        XCTAssertFalse(representatives.contains { $0.id == japaneseAmazon.id })
+    }
+
+    func testSafetyInspectionReusesEquivalentArtworkAcrossFinalCards() {
+        let repeatedArtwork = [
+            UInt8(20), 40, 60, 255,
+            80, 100, 120, 255
+        ]
+        let differentArtwork = [
+            UInt8(220), 200, 180, 255,
+            160, 140, 120, 255
+        ]
+        let japaneseVolume = storefrontSuggestion(
+            provider: .bookLiveJP,
+            language: "ja",
+            volumeNumber: 1,
+            visualSignature: repeatedArtwork
+        )
+        let englishVolume = storefrontSuggestion(
+            provider: .amazon,
+            language: "en",
+            volumeNumber: 1,
+            visualSignature: repeatedArtwork
+        )
+        let secondVolume = storefrontSuggestion(
+            provider: .amazon,
+            language: "en",
+            volumeNumber: 2,
+            visualSignature: differentArtwork
+        )
+
+        let representatives = SableMangaBakaStorefrontDiscovery
+            .safetyInspectionRepresentatives(
+                from: [japaneseVolume, englishVolume, secondVolume]
+            )
+
+        XCTAssertEqual(representatives.count, 2)
+        XCTAssertTrue(representatives.contains { $0.id == secondVolume.id })
+        XCTAssertEqual(
+            representatives.filter {
+                SableMangaBakaStorefrontDiscovery
+                    .visualSignaturesAreEquivalent(
+                        $0.visualSignature,
+                        repeatedArtwork
+                    )
+            }.count,
+            1
+        )
+    }
+
+    func testExistingSafetySharesSimilarArtworkAcrossLocalizedCoverSlots() {
+        let german = directSafetyFingerprint(
+            url: "https://example.test/de/39.jpg",
+            featurePrint: [0.10, 0.20, 0.30]
+        )
+        let french = directSafetyFingerprint(
+            url: "https://example.test/fr/39.jpg",
+            featurePrint: [0.20, 0.30, 0.40]
+        )
+        let italian = directSafetyFingerprint(
+            url: "https://example.test/it/39.jpg",
+            featurePrint: [0.30, 0.40, 0.50]
+        )
+
+        let groups = SableMangaBakaStorefrontDiscovery
+            .directCoverSafetyGroups(from: [german, french, italian])
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.count, 3)
+    }
+
+    func testExistingSafetyKeepsAlternateArtworkInTheSameSlotSeparate() {
+        let standardEdition = directSafetyFingerprint(
+            url: "https://example.test/en/1.jpg",
+            featurePrint: [0.10, 0.20, 0.30]
+        )
+        let alternateEdition = directSafetyFingerprint(
+            url: "https://example.test/en/1-alternate.jpg",
+            featurePrint: [1.10, 1.20, 1.30]
+        )
+
+        let groups = SableMangaBakaStorefrontDiscovery
+            .directCoverSafetyGroups(
+                from: [standardEdition, alternateEdition]
+            )
+
+        XCTAssertEqual(groups.count, 2)
+    }
+
+    func testExistingSafetyNeverSharesAcrossNumberOrCoverType() {
+        let volumeOne = directSafetyFingerprint(
+            url: "https://example.test/en/1.jpg",
+            featurePrint: [0.10, 0.20, 0.30]
+        )
+        let volumeTwo = directSafetyFingerprint(
+            url: "https://example.test/en/2.jpg",
+            indexNumeric: 2,
+            featurePrint: [0.10, 0.20, 0.30]
+        )
+        let backCover = directSafetyFingerprint(
+            url: "https://example.test/en/back-1.jpg",
+            coverType: "volume_back",
+            featurePrint: [0.10, 0.20, 0.30]
+        )
+
+        let groups = SableMangaBakaStorefrontDiscovery
+            .directCoverSafetyGroups(
+                from: [volumeOne, volumeTwo, backCover]
+            )
+
+        XCTAssertEqual(groups.count, 3)
+    }
+
     func testMangaBakaSubmissionKeepsOnlyEarliestChapterForRepeatedArtwork() {
         let repeatedArtwork = [
             UInt8(20), 40, 60, 255,
@@ -8276,6 +8849,10 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
         XCTAssertEqual(
             store.selectedMangaBakaStorefrontSuggestions.map(\.id),
+            [firstChapter.id]
+        )
+        XCTAssertEqual(
+            store.storefrontCompositeSlots.map(\.winner.id),
             [firstChapter.id]
         )
     }
@@ -9339,6 +9916,47 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         )
     }
 
+    func testKyoboExactEbookParserLoadsEmbeddedCompleteSeriesShelf() {
+        let html = """
+        <input type="hidden" value="5800007162851" id="srisMotherCmdtid">
+        <input type="hidden" value="[
+          {&quot;dgctSaleCmdtDvsnCode&quot;:&quot;EBK&quot;,
+           &quot;saleCmdtid&quot;:&quot;E000003372828&quot;,
+           &quot;cmdtHnglName&quot;:&quot;블리치. 2&quot;,
+           &quot;cverBarcd&quot;:&quot;480D161103060&quot;,
+           &quot;arngSqnc&quot;:&quot;2&quot;},
+          {&quot;dgctSaleCmdtDvsnCode&quot;:&quot;EBK&quot;,
+           &quot;saleCmdtid&quot;:&quot;E000003372827&quot;,
+           &quot;cmdtHnglName&quot;:&quot;블리치. 1&quot;,
+           &quot;cverBarcd&quot;:&quot;480D161103050&quot;,
+           &quot;arngSqnc&quot;:&quot;1&quot;}
+        ]" id="jsonSrisProductList">
+        <ol><li class="depth_item active"><a>만화</a></li></ol>
+        """
+
+        let products = SableMangaBakaStorefrontDiscovery
+            .kyoboSeriesProducts(from: html)
+
+        XCTAssertEqual(products.map(\.id), [
+            "E000003372827",
+            "E000003372828"
+        ])
+        XCTAssertEqual(products.map(\.volumeNumber), [1, 2])
+        XCTAssertEqual(products.map(\.seriesID), [
+            "5800007162851",
+            "5800007162851"
+        ])
+        XCTAssertEqual(products.map(\.mediaType), ["manga", "manga"])
+        XCTAssertEqual(
+            products.last?.imageURL,
+            "https://contents.kyobobook.co.kr/sih/fit-in/3000x0/pdt/480D161103060.jpg"
+        )
+        XCTAssertEqual(
+            products.last?.storeURL,
+            "https://ebook-product.kyobobook.co.kr/dig/epd/ebook/E000003372828"
+        )
+    }
+
     func testKyoboExactPrintSearchParserReadsSuppliedMangaVolumes() {
         let html = """
         <input class="result_checkbox"
@@ -10088,7 +10706,7 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
         usesManualMediaTypeOverride: Bool = false,
         usesPublisherMediaTypeProof: Bool = false,
         contentRating: String = "safe",
-        contentRatingWasInferred: Bool = false,
+        contentRatingWasInferred: Bool = true,
         detectedVolumeNumbers: [Int] = [],
         detectedChapterNumbers: [Int] = [],
         publicationType: String? = nil,
@@ -10120,6 +10738,23 @@ final class SableMangaBakaCoverStudioTests: XCTestCase {
             detectedChapterNumbers: detectedChapterNumbers,
             publicationType: publicationType,
             visualSignature: visualSignature
+        )
+    }
+
+    private func directSafetyFingerprint(
+        url: String,
+        coverType: String = "volume",
+        indexNumeric: Double = 1,
+        featurePrint: [Float]
+    ) -> SableMangaBakaStorefrontDiscovery.DirectCoverSafetyFingerprint {
+        SableMangaBakaStorefrontDiscovery.DirectCoverSafetyFingerprint(
+            sourceURL: url,
+            coverType: coverType,
+            indexNumeric: indexNumeric,
+            width: 1_000,
+            height: 1_500,
+            visualSignature: [],
+            visualFeaturePrint: featurePrint
         )
     }
 

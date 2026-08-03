@@ -1,0 +1,36 @@
+SableLibraryCoverSafetyClassifier
+
+This model uses the MobileNetV3 backbone from deepghs/anime_rating:
+https://huggingface.co/deepghs/anime_rating
+
+Author: deepghs
+Pinned revision: 46be80bfe01a415efa5aa7c025528cac82a8b88a
+Backbone SHA-256: e95daceaa43c62c708fdd773621934790b515b41e63b6ca7f48af0d97cfb8967
+License declared by the model card: MIT
+
+Sable's Library removed the original three-class output head and trained a
+four-level ordinal safety head using user-reviewed manga and light-novel cover
+artwork. The final output includes a conservative upward bias so uncertain
+predictions favor a stricter warning.
+
+MIT License
+
+Copyright (c) deepghs
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

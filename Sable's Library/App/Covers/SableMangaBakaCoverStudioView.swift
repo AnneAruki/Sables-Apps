@@ -215,6 +215,54 @@ nonisolated struct SableRolerConfirmedStorefrontGroup: Equatable {
     var providerSeriesIDs: Set<String>
 }
 
+nonisolated struct SableMangaBakaCoverSafetyCorrection:
+    Equatable, Identifiable, Sendable {
+    let id: String
+    let originalRating: String
+    let proposedRating: String
+    let inventoryGroup: SableMangaBakaCoverInventoryGroup
+    let language: String
+
+    init(
+        cover: SableMangaBakaCoverImage,
+        originalRating: String,
+        proposedRating: String
+    ) {
+        id = Self.identity(for: cover)
+        self.originalRating = originalRating
+        self.proposedRating = proposedRating
+        inventoryGroup = cover.inventoryGroup
+        language = cover.language
+    }
+
+    func matches(_ cover: SableMangaBakaCoverImage) -> Bool {
+        id == Self.identity(for: cover)
+    }
+
+    private static func identity(
+        for cover: SableMangaBakaCoverImage
+    ) -> String {
+        if let imageID = cover.id {
+            return "image:\(imageID)"
+        }
+        let language = cover.language
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+        let type = cover.type
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return [
+            "slot",
+            String(cover.seriesID ?? 0),
+            language,
+            type,
+            String(cover.indexNumeric)
+        ]
+        .joined(separator: "|")
+    }
+}
+
 private struct SableRolerUploadSyncPlan {
     var mangaBakaSeriesID: Int
     var groups: [SableRolerConfirmedStorefrontGroup]
@@ -246,6 +294,16 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     @Published var status = "Search MangaBaka or paste a series URL."
     @Published var errorMessage: String?
     @Published var isWorking = false
+    @Published private(set) var isCheckingExistingCoverSafety = false
+    @Published private(set) var existingCoverSafetyDidComplete = false
+    @Published private(set) var existingCoverSafetyCompleted = 0
+    @Published private(set) var existingCoverSafetyTotal = 0
+    @Published private(set) var existingCoverSafetyProgressLabel =
+        "Comparing artwork"
+    @Published private(set) var existingCoverSafetyCorrectionCount = 0
+    @Published private(set) var existingCoverSafetyReviewedCount = 0
+    @Published private(set) var existingCoverSafetyCorrections:
+        [SableMangaBakaCoverSafetyCorrection] = []
     @Published private(set) var hasMangaBakaToken = false
     @Published private(set) var mangaBakaAccountRole:
         SableMangaBakaAccountRole?
@@ -272,11 +330,23 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     @Published var coverStatsBySeriesID: [Int: SableMangaBakaPublicCoverStats] = [:]
     @Published var browseExpectedVolumeCountsBySeriesID: [Int: Int] = [:]
     @Published var browseCoverStatsFailureIDs: Set<Int> = []
-    @Published var storefrontSuggestions: [SableMangaBakaStorefrontCoverSuggestion] = []
-    @Published var selectedStorefrontSuggestionIDs: Set<String> = []
-    @Published var excludedStorefrontSuggestionIDs: Set<String> = []
-    @Published var approvedStorefrontReviewGroupIDs: Set<String> = []
-    @Published var rejectedStorefrontReviewGroupIDs: Set<String> = []
+    @Published var storefrontSuggestions: [SableMangaBakaStorefrontCoverSuggestion] = [] {
+        didSet { rebuildStorefrontSuggestionCaches() }
+    }
+    @Published var selectedStorefrontSuggestionIDs: Set<String> = [] {
+        didSet { refreshStorefrontCompositeSlots() }
+    }
+    @Published var excludedStorefrontSuggestionIDs: Set<String> = [] {
+        didSet { refreshStorefrontCompositeSlots() }
+    }
+    @Published var approvedStorefrontReviewGroupIDs: Set<String> = [] {
+        didSet { refreshStorefrontCompositeSlots() }
+    }
+    @Published var rejectedStorefrontReviewGroupIDs: Set<String> = [] {
+        didSet { refreshStorefrontCompositeSlots() }
+    }
+    @Published private(set) var storefrontCompositeSlots:
+        [SableMangaBakaStorefrontCompositeSlot] = []
     @Published var rolerMatchShareStatuses:
         [String: SableRolerMatchShareStatus] = [:]
     @Published var rolerBookCorrectionStatuses:
@@ -316,6 +386,8 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     private var storefrontScanClock: Task<Void, Never>?
     private var storefrontScanTask: Task<Void, Never>?
     private var storefrontScanStopFallback: Task<Void, Never>?
+    private var existingCoverSafetyTask: Task<Void, Never>?
+    private var existingCoverSafetyGeneration = UUID()
     private var storefrontScanGeneration = UUID()
     private var storefrontScanProgressAccumulator:
         SableMangaBakaStorefrontScanProgress?
@@ -323,6 +395,8 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     private var stagedStorefrontMappingSuggestionIDs: Set<String> = []
     private var pendingRolerBookCorrections:
         [String: SableRolerBookVolumeCorrection] = [:]
+    private var cachedMangaBakaSubmissionSuggestions:
+        [SableMangaBakaStorefrontCoverSuggestion] = []
     private let browseResultPageSize = 25
 
     init(
@@ -376,6 +450,17 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     }
 
     func goBack() {
+        existingCoverSafetyTask?.cancel()
+        existingCoverSafetyGeneration = UUID()
+        existingCoverSafetyTask = nil
+        isCheckingExistingCoverSafety = false
+        existingCoverSafetyDidComplete = false
+        existingCoverSafetyCompleted = 0
+        existingCoverSafetyTotal = 0
+        existingCoverSafetyProgressLabel = "Comparing artwork"
+        existingCoverSafetyCorrectionCount = 0
+        existingCoverSafetyReviewedCount = 0
+        existingCoverSafetyCorrections = []
         storefrontScanTask?.cancel()
         storefrontScanClock?.cancel()
         storefrontScanStopFallback?.cancel()
@@ -589,6 +674,45 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             }.count
     }
 
+    var existingCoverSafetyCorrectionDraftIndices: [Int] {
+        guard !existingCoverSafetyCorrections.isEmpty else { return [] }
+        return draftImages.indices.filter { index in
+            existingCoverSafetyCorrections.contains {
+                $0.matches(draftImages[index])
+            }
+        }
+    }
+
+    func existingCoverSafetyCorrection(
+        atDraftIndex index: Int
+    ) -> SableMangaBakaCoverSafetyCorrection? {
+        guard draftImages.indices.contains(index) else { return nil }
+        return existingCoverSafetyCorrections.first {
+            $0.matches(draftImages[index])
+        }
+    }
+
+    func existingCoverSafetyCorrectionCount(
+        in group: SableMangaBakaCoverInventoryGroup
+    ) -> Int {
+        existingCoverSafetyCorrections.filter {
+            $0.inventoryGroup == group
+                && coverInventoryMatches(language: $0.language)
+        }.count
+    }
+
+    func existingCoverSafetyCorrectionCount(
+        in group: SableMangaBakaCoverInventoryGroup,
+        language: String
+    ) -> Int {
+        let normalizedLanguage = normalizedStudioLanguage(language)
+        return existingCoverSafetyCorrections.filter {
+            $0.inventoryGroup == group
+                && normalizedStudioLanguage($0.language)
+                    == normalizedLanguage
+        }.count
+    }
+
     func draftImageIndices(
         in group: SableMangaBakaCoverInventoryGroup
     ) -> [Int] {
@@ -611,6 +735,48 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         in group: SableMangaBakaCoverInventoryGroup
     ) -> Int {
         draftImageIndices(in: group).count + liveOnlyCovers(in: group).count
+    }
+
+    func coverInventoryLanguageCodes(
+        in group: SableMangaBakaCoverInventoryGroup
+    ) -> [String] {
+        coverInventoryLanguageCodes.filter { language in
+            (coverInventoryLanguage == "all"
+                || coverInventoryLanguage == language)
+                && coverInventoryCount(in: group, language: language) > 0
+        }
+    }
+
+    func draftImageIndices(
+        in group: SableMangaBakaCoverInventoryGroup,
+        language: String
+    ) -> [Int] {
+        let normalizedLanguage = normalizedStudioLanguage(language)
+        return draftImages.indices.filter {
+            draftImages[$0].inventoryGroup == group
+                && normalizedStudioLanguage(draftImages[$0].language)
+                    == normalizedLanguage
+        }
+    }
+
+    func liveOnlyCovers(
+        in group: SableMangaBakaCoverInventoryGroup,
+        language: String
+    ) -> [SableMangaBakaPublicCoverImage] {
+        let normalizedLanguage = normalizedStudioLanguage(language)
+        return liveOnlyMangaBakaCovers.filter {
+            $0.inventoryGroup == group
+                && normalizedStudioLanguage($0.language)
+                    == normalizedLanguage
+        }
+    }
+
+    func coverInventoryCount(
+        in group: SableMangaBakaCoverInventoryGroup,
+        language: String
+    ) -> Int {
+        draftImageIndices(in: group, language: language).count
+            + liveOnlyCovers(in: group, language: language).count
     }
 
     private func coverInventoryMatches(language: String) -> Bool {
@@ -1022,6 +1188,17 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         _ series: SableMangaBakaSeriesSummary,
         preservingStorefrontResults: Bool = false
     ) async {
+        existingCoverSafetyTask?.cancel()
+        existingCoverSafetyGeneration = UUID()
+        existingCoverSafetyTask = nil
+        isCheckingExistingCoverSafety = false
+        existingCoverSafetyDidComplete = false
+        existingCoverSafetyCompleted = 0
+        existingCoverSafetyTotal = 0
+        existingCoverSafetyProgressLabel = "Comparing artwork"
+        existingCoverSafetyCorrectionCount = 0
+        existingCoverSafetyReviewedCount = 0
+        existingCoverSafetyCorrections = []
         storefrontScanClock?.cancel()
         storefrontScanClock = nil
         storefrontScanProgress = nil
@@ -1101,6 +1278,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
                 status = "Loaded \(preparedImages.count) live MangaBaka cover image\(preparedImages.count == 1 ? "" : "s")."
             }
             isWorking = false
+            startExistingCoverSafetyAudit()
         } catch {
             draftImages = []
             directCoverInspectionsByID = [:]
@@ -1111,6 +1289,160 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             snapshotVersion = nil
             finish(error)
         }
+    }
+
+    private func startExistingCoverSafetyAudit() {
+        guard !draftImages.isEmpty else { return }
+        let coversNeedingVision = draftImages.filter {
+            humanSafetyRating(for: $0) == nil
+        }
+
+        let generation = UUID()
+        existingCoverSafetyGeneration = generation
+        existingCoverSafetyCompleted = 0
+        existingCoverSafetyTotal = coversNeedingVision.count
+        existingCoverSafetyProgressLabel = "Comparing artwork"
+        existingCoverSafetyCorrectionCount = 0
+        existingCoverSafetyReviewedCount = draftImages.count
+        existingCoverSafetyCorrections = []
+        isCheckingExistingCoverSafety = true
+        existingCoverSafetyDidComplete = false
+
+        existingCoverSafetyTask = Task { [weak self] in
+            guard let self else { return }
+            let inspections = await storefrontDiscovery
+                .inspectDirectCoverSafety(
+                    coversNeedingVision,
+                    progress: { [weak self] completed, total, phase in
+                        guard let self,
+                              self.existingCoverSafetyGeneration
+                                == generation else {
+                            return
+                        }
+                        self.existingCoverSafetyCompleted = completed
+                        self.existingCoverSafetyTotal = total
+                        self.existingCoverSafetyProgressLabel = switch phase {
+                        case .comparingArtwork:
+                            "Comparing artwork"
+                        case .checkingSafety:
+                            "Checking safety"
+                        }
+                    }
+                )
+            guard !Task.isCancelled,
+                  existingCoverSafetyGeneration == generation else {
+                return
+            }
+
+            let inspectionsByID = Dictionary(
+                uniqueKeysWithValues: inspections.map { ($0.id, $0) }
+            )
+            var correctedImages = draftImages
+            var corrections: [SableMangaBakaCoverSafetyCorrection] = []
+            for index in correctedImages.indices {
+                if let humanRating = humanSafetyRating(
+                    for: correctedImages[index]
+                ) {
+                    guard SableMangaBakaCoverSafetyAutomation.rank(
+                        humanRating
+                    ) != SableMangaBakaCoverSafetyAutomation.rank(
+                        correctedImages[index].contentRating
+                    ) else {
+                        continue
+                    }
+                    corrections.append(
+                        SableMangaBakaCoverSafetyCorrection(
+                            cover: correctedImages[index],
+                            originalRating:
+                                correctedImages[index].contentRating,
+                            proposedRating: humanRating
+                        )
+                    )
+                    correctedImages[index].contentRating = humanRating
+                    continue
+                }
+                let sourceURL = correctedImages[index].previewURL
+                    ?? correctedImages[index].url
+                let identity = SableMangaBakaCoverSnapshot
+                    .coverURLIdentity(sourceURL)
+                guard let inspection = inspectionsByID[identity],
+                      let proposedRating =
+                        SableMangaBakaCoverSafetyAutomation
+                            .proposedReviewRating(
+                                currentRating:
+                                    correctedImages[index].contentRating,
+                                inferredRating: inspection.contentRating,
+                                wasInferred:
+                                    inspection.contentRatingWasInferred
+                            ) else {
+                    continue
+                }
+                corrections.append(
+                    SableMangaBakaCoverSafetyCorrection(
+                        cover: correctedImages[index],
+                        originalRating:
+                            correctedImages[index].contentRating,
+                        proposedRating: proposedRating
+                    )
+                )
+                correctedImages[index].contentRating = proposedRating
+            }
+
+            if !corrections.isEmpty {
+                draftImages = correctedImages
+            }
+            existingCoverSafetyCorrections = corrections
+            let correctionCount = corrections.count
+            existingCoverSafetyCorrectionCount = correctionCount
+            isCheckingExistingCoverSafety = false
+            existingCoverSafetyDidComplete = true
+            existingCoverSafetyTask = nil
+            guard correctionCount > 0 else { return }
+
+            let safetyNote =
+                "Prepared \(correctionCount) cover safety correction\(correctionCount == 1 ? "" : "s") after checking the final unique images against human judgments and local vision. Every rating change remains reviewable before it is applied."
+            let existingNote = submissionNote.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            submissionNote = existingNote.isEmpty
+                ? safetyNote
+                : "\(existingNote) \(safetyNote)"
+            status =
+                "Loaded the MangaBaka cover set and prepared \(correctionCount) safety rating correction\(correctionCount == 1 ? "" : "s") for review."
+            invalidatePreview()
+        }
+    }
+
+    private func humanSafetyRating(
+        for cover: SableMangaBakaCoverImage
+    ) -> String? {
+        guard let seriesID = cover.seriesID ?? selectedSeries?.id else {
+            return nil
+        }
+        if let imageID = cover.id,
+           let rating = SableCoverSafetyHumanMemory.shared.rating(
+               seriesID: seriesID,
+               imageID: imageID
+           ) {
+            return rating
+        }
+        if let rating = SableCoverSafetyHumanMemory.shared.rating(
+            seriesID: seriesID,
+            sourceURL: cover.url
+        ) ?? cover.previewURL.flatMap({
+            SableCoverSafetyHumanMemory.shared.rating(
+                seriesID: seriesID,
+                sourceURL: $0
+            )
+        }) {
+            return rating
+        }
+        return SableCoverSafetyHumanMemory.shared.rating(
+            seriesID: seriesID,
+            language: cover.language,
+            type: cover.type,
+            indexNumeric: cover.indexNumeric
+        )
     }
 
     func prepareStorefrontStateForSeriesLoad(
@@ -1354,29 +1686,35 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         }
     }
 
-    var storefrontCompositeSlots:
-        [SableMangaBakaStorefrontCompositeSlot] {
-        SableMangaBakaStorefrontDiscovery.compositeSlots(
-            from: storefrontSuggestions.filter {
-                !storefrontSuggestionIsExcluded($0)
-                    && !storefrontRelationshipReviewIsRejected(for: $0)
-                    && !$0.imageNeedsReplacement
-            },
-            selectedSuggestionIDs: selectedStorefrontSuggestionIDs,
-            manualReviewEvaluator: storefrontSuggestionNeedsReview
-        )
+    private func rebuildStorefrontSuggestionCaches() {
+        cachedMangaBakaSubmissionSuggestions =
+            SableMangaBakaStorefrontDiscovery
+            .mangaBakaSubmissionSuggestions(from: storefrontSuggestions)
+        refreshStorefrontCompositeSlots()
+    }
+
+    private func refreshStorefrontCompositeSlots() {
+        storefrontCompositeSlots =
+            SableMangaBakaStorefrontDiscovery.compositeSlots(
+                fromPreparedSuggestions:
+                    cachedMangaBakaSubmissionSuggestions.filter {
+                        !storefrontSuggestionIsExcluded($0)
+                            && !storefrontRelationshipReviewIsRejected(for: $0)
+                            && !$0.imageNeedsReplacement
+                    },
+                selectedSuggestionIDs: selectedStorefrontSuggestionIDs,
+                manualReviewEvaluator: storefrontSuggestionNeedsReview
+            )
     }
 
     var selectedMangaBakaStorefrontSuggestions:
         [SableMangaBakaStorefrontCoverSuggestion] {
-        SableMangaBakaStorefrontDiscovery.mangaBakaSubmissionSuggestions(
-            from: storefrontSuggestions.filter {
-                !storefrontSuggestionIsExcluded($0)
-                    && !storefrontRelationshipReviewIsRejected(for: $0)
-                    && !$0.imageNeedsReplacement
-            }
-        )
-        .filter { selectedStorefrontSuggestionIDs.contains($0.id) }
+        cachedMangaBakaSubmissionSuggestions.filter {
+            !storefrontSuggestionIsExcluded($0)
+                && !storefrontRelationshipReviewIsRejected(for: $0)
+                && !$0.imageNeedsReplacement
+                && selectedStorefrontSuggestionIDs.contains($0.id)
+        }
     }
 
     func moveStorefrontCompositeWinner(
@@ -1448,12 +1786,25 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let references = urls.compactMap(
-            SableMangaBakaStorefrontDiscovery.storeSeriesReference
+        let recognizedStoreLinks = urls.compactMap {
+            value -> (url: String, reference: SableMangaBakaStorefrontDiscovery.StoreSeriesReference)? in
+            guard let reference = SableMangaBakaStorefrontDiscovery
+                .storeSeriesReference(from: value) else {
+                return nil
+            }
+            return (value, reference)
+        }
+        let references = recognizedStoreLinks.map(\.reference)
+        let directCoverURLs = urls.compactMap(
+            SableMangaBakaStorefrontDiscovery.directCoverURL
         )
-        guard !references.isEmpty else {
+        let unrecognizedCount = max(
+            0,
+            urls.count - references.count - directCoverURLs.count
+        )
+        guard !references.isEmpty || !directCoverURLs.isEmpty else {
             errorMessage =
-                "Paste a BookLive, BookWalker, Amazon, Barnes & Noble, Audible, YES24, or Kyobo store page. Direct image links belong in the cover URL section below."
+                "Paste a supported store page or a direct cover image link."
             return
         }
 
@@ -1464,25 +1815,69 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         errorMessage = nil
         storefrontStageSummary = nil
         exactStoreSeriesOutcomes = []
-        let scanGeneration = beginStorefrontScan(providers: providers)
-        status = "Checking \(references.count) exact store link\(references.count == 1 ? "" : "s")..."
+        let scanGeneration: UUID?
+        if references.isEmpty {
+            storefrontScanClock?.cancel()
+            storefrontScanClock = nil
+            storefrontScanProgress = nil
+            storefrontScanProgressAccumulator = nil
+            scanGeneration = nil
+        } else {
+            scanGeneration = beginStorefrontScan(providers: providers)
+        }
+        var workLabels: [String] = []
+        if !references.isEmpty {
+            workLabels.append(
+                "\(references.count) exact store link\(references.count == 1 ? "" : "s")"
+            )
+        }
+        if !directCoverURLs.isEmpty {
+            workLabels.append(
+                "\(directCoverURLs.count) direct cover link\(directCoverURLs.count == 1 ? "" : "s")"
+            )
+        }
+        status = "Checking \(workLabels.joined(separator: " and "))..."
 
         storefrontScanTask = Task { [weak self] in
             guard let self else { return }
-            let discovery = await storefrontDiscovery.discover(
-                storeSeriesURLs: urls,
-                for: selectedSeries,
-                progress: { [weak self] event in
-                    await self?.recordStorefrontScan(event)
-                }
-            )
-            guard storefrontScanGeneration == scanGeneration else { return }
+            let discovery: SableMangaBakaStorefrontDiscoveryResult
+            if references.isEmpty {
+                discovery = SableMangaBakaStorefrontDiscoveryResult(
+                    suggestions: [],
+                    notes: []
+                )
+            } else {
+                discovery = await storefrontDiscovery.discover(
+                    storeSeriesURLs: recognizedStoreLinks.map(\.url),
+                    for: selectedSeries,
+                    progress: { [weak self] event in
+                        await self?.recordStorefrontScan(event)
+                    }
+                )
+            }
+            let directInspections = directCoverURLs.isEmpty
+                ? []
+                : await storefrontDiscovery.inspectDirectCoverURLs(
+                    directCoverURLs
+                )
+            if let scanGeneration,
+               storefrontScanGeneration != scanGeneration {
+                return
+            }
             let wasCancelled = Task.isCancelled
             let replacedProviders = Set(
-                references.filter { $0.itemType != "book" }.map(\.provider)
+                references.filter {
+                    $0.itemType != "book"
+                        || ($0.provider == .kyobo
+                            && $0.publicationTypeOverride == "digital")
+                }.map(\.provider)
             )
             let replacedBookKeys = Set(
-                references.filter { $0.itemType == "book" }.map {
+                references.filter {
+                    $0.itemType == "book"
+                        && !($0.provider == .kyobo
+                            && $0.publicationTypeOverride == "digital")
+                }.map {
                     "\($0.provider.rawValue):\($0.itemID.lowercased())"
                 }
             )
@@ -1517,8 +1912,20 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             exactStoreSeriesOutcomes = exactStoreSeriesOutcomeText(
                 references: references,
                 discovery: discovery,
-                unrecognizedCount: urls.count - references.count
+                unrecognizedCount: unrecognizedCount
             )
+            rememberDirectCoverInspections(directInspections)
+            let directStage = stageCheckedPastedURLs(
+                directCoverURLs,
+                selectedSeries: selectedSeries,
+                requiresInspection: true,
+                updatesStatus: false
+            )
+            if !directCoverURLs.isEmpty {
+                exactStoreSeriesOutcomes.append(
+                    "Direct cover links: loaded \(directStage.added) maximum-quality image\(directStage.added == 1 ? "" : "s")\(directStage.unavailable > 0 ? "; \(directStage.unavailable) link\(directStage.unavailable == 1 ? " was" : "s were") not a readable image" : "")\(directStage.skipped > 0 ? "; \(directStage.skipped) duplicate or invalid link\(directStage.skipped == 1 ? " was" : "s were") skipped" : "")."
+                )
+            }
 
             let availableSuggestionIDs = Set(storefrontSuggestions.map(\.id))
             selectedStorefrontSuggestionIDs.formIntersection(
@@ -1533,17 +1940,31 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
                 removedSuggestionIDs
             )
             if wasCancelled {
-                status = discovery.suggestions.isEmpty
+                status = discovery.suggestions.isEmpty && directStage.added == 0
                     ? "Exact store scan stopped. Existing provider results were kept."
-                    : "Exact store scan stopped. Kept \(discovery.suggestions.count) cover result\(discovery.suggestions.count == 1 ? "" : "s") found before stopping."
-            } else if discovery.suggestions.isEmpty {
+                    : "Link scan stopped. Kept \(discovery.suggestions.count + directStage.added) cover result\(discovery.suggestions.count + directStage.added == 1 ? "" : "s") found before stopping."
+            } else if discovery.suggestions.isEmpty && directStage.added == 0 {
                 status = exactStoreSeriesOutcomes.count == 1
                     ? exactStoreSeriesOutcomes[0]
-                    : "The manual store relationships were accepted, but they contained no usable book, audiobook, or chapter covers. See Exact Store Results for each reason."
+                    : "The links contained no usable covers. See Exact Link Results for each reason."
             } else {
-                status = "Found \(discovery.suggestions.count) quality-checked book, audiobook, or chapter cover\(discovery.suggestions.count == 1 ? "" : "s") from the manual store links. They are unchecked so you can decide which ones to use."
+                var resultLabels: [String] = []
+                if !discovery.suggestions.isEmpty {
+                    resultLabels.append(
+                        "\(discovery.suggestions.count) store cover\(discovery.suggestions.count == 1 ? "" : "s")"
+                    )
+                }
+                if directStage.added > 0 {
+                    resultLabels.append(
+                        "\(directStage.added) direct cover\(directStage.added == 1 ? "" : "s")"
+                    )
+                }
+                status = "Loaded \(resultLabels.joined(separator: " and ")). Store results are unchecked; direct images are in the proposed cover set. Review the cards before applying anything."
             }
-            finishStorefrontScan(wasCancelled: wasCancelled)
+            storeSeriesURLs = ""
+            if scanGeneration != nil {
+                finishStorefrontScan(wasCancelled: wasCancelled)
+            }
             storefrontScanStopFallback?.cancel()
             storefrontScanStopFallback = nil
             isStoppingStorefrontScan = false
@@ -1598,12 +2019,12 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
     func pasteStoreSeriesURLs() {
         guard let value = NSPasteboard.general.string(forType: .string),
               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = "The clipboard does not contain a store URL."
+            errorMessage = "The clipboard does not contain a link."
             return
         }
         storeSeriesURLs = value
         status =
-            "Store links pasted. Check them, then choose Scan Exact Links."
+            "Links pasted. Check them, then choose Scan Links."
     }
 
     fileprivate var storefrontScanCompactSummary: String? {
@@ -2835,6 +3256,7 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         SableMangaBakaStorefrontDiscovery.preferredSuggestions(
             from: suggestions.filter {
                 !$0.imageNeedsReplacement
+                    && $0.contentRatingWasInferred
                     && !$0.requiresNumberingReview
                     && (
                         !$0.requiresRelationshipReview
@@ -3368,27 +3790,34 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             guard let self else { return }
             let inspections = await storefrontDiscovery
                 .inspectDirectCoverURLs(urls)
-            let measuredByID = Dictionary(
-                uniqueKeysWithValues: inspections.map { ($0.id, $0) }
-            )
-            directCoverInspectionsByID.merge(
-                measuredByID,
-                uniquingKeysWith: { _, new in new }
-            )
+            rememberDirectCoverInspections(inspections)
             stageCheckedPastedURLs(
                 urls,
-                selectedSeries: selectedSeries,
-                measuredCount: inspections.count
+                selectedSeries: selectedSeries
             )
             isWorking = false
         }
     }
 
+    private func rememberDirectCoverInspections(
+        _ inspections: [SableMangaBakaDirectCoverInspection]
+    ) {
+        for inspection in inspections {
+            directCoverInspectionsByID[inspection.id] = inspection
+            let resolvedID = SableMangaBakaCoverSnapshot.coverURLIdentity(
+                inspection.url
+            )
+            directCoverInspectionsByID[resolvedID] = inspection
+        }
+    }
+
+    @discardableResult
     private func stageCheckedPastedURLs(
         _ urls: [String],
         selectedSeries: SableMangaBakaSeriesSummary,
-        measuredCount: Int
-    ) {
+        requiresInspection: Bool = false,
+        updatesStatus: Bool = true
+    ) -> (added: Int, skipped: Int, unavailable: Int) {
         var existing = Set(
             draftImages.map {
                 SableMangaBakaCoverSnapshot.coverURLIdentity($0.url)
@@ -3397,27 +3826,40 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
         var nextIndex = Double(startIndex)
         var added = 0
         var skipped = 0
+        var unavailable = 0
         for value in urls {
-            let identity = SableMangaBakaCoverSnapshot.coverURLIdentity(value)
-            guard URL(string: value)?.host != nil,
-                  !existing.contains(identity) else {
+            let sourceIdentity = SableMangaBakaCoverSnapshot
+                .coverURLIdentity(value)
+            let inspection = directCoverInspectionsByID[sourceIdentity]
+            if requiresInspection, inspection == nil {
+                unavailable += 1
+                continue
+            }
+            let resolvedURL = inspection?.url ?? value
+            let resolvedIdentity = SableMangaBakaCoverSnapshot
+                .coverURLIdentity(resolvedURL)
+            guard URL(string: resolvedURL)?.host != nil,
+                  !existing.contains(resolvedIdentity) else {
                 skipped += 1
                 continue
             }
             let isFirstCover = draftImages.isEmpty && added == 0
+            let resolvedRating = inspection?.contentRatingWasInferred == true
+                ? inspection?.contentRating ?? "suggestive"
+                : "suggestive"
             draftImages.append(SableMangaBakaCoverImage(
                 seriesID: selectedSeries.id,
-                url: value,
+                url: resolvedURL,
                 index: indexText(nextIndex),
                 indexNumeric: nextIndex,
                 language: addedLanguage,
                 type: addedType,
                 note: addedNote.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                contentRating: addedRating,
+                contentRating: resolvedRating,
                 isDefault: isFirstCover
             ))
-            existing.insert(identity)
-            directCoverLinkIDs.insert(identity)
+            existing.insert(resolvedIdentity)
+            directCoverLinkIDs.insert(resolvedIdentity)
             nextIndex += 1
             added += 1
         }
@@ -3431,8 +3873,10 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
                 submissionNote += " Updated the default cover using the preferred language and cover-type order."
             }
         }
-        let unavailableCount = max(added - measuredCount, 0)
-        status = "Added \(added) cover link\(added == 1 ? "" : "s") to the proposed MangaBaka set\(skipped > 0 ? "; \(skipped) duplicate or invalid link\(skipped == 1 ? "" : "s") skipped" : "")\(unavailableCount > 0 ? "; size unavailable for \(unavailableCount)" : ""). Review the cards, then confirm the MangaBaka submission when ready."
+        if updatesStatus {
+            status = "Added \(added) cover link\(added == 1 ? "" : "s") to the proposed MangaBaka set\(skipped > 0 ? "; \(skipped) duplicate or invalid link\(skipped == 1 ? "" : "s") skipped" : "")\(unavailable > 0 ? "; \(unavailable) unreadable image link\(unavailable == 1 ? "" : "s") skipped" : ""). Review the cards, then confirm the MangaBaka submission when ready."
+        }
+        return (added, skipped, unavailable)
     }
 
     func pasteCoverURLs() {
@@ -3500,6 +3944,45 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
 
     func imageChanged() {
         invalidatePreview()
+    }
+
+    func setDraftImageContentRating(
+        at index: Int,
+        to rating: String
+    ) {
+        guard draftImages.indices.contains(index),
+              SableMangaBakaCoverImage.supportedRatings.contains(rating)
+        else {
+            return
+        }
+        let cover = draftImages[index]
+        draftImages[index].contentRating = rating
+
+        if let seriesID = cover.seriesID ?? selectedSeries?.id {
+            SableCoverSafetyHumanMemory.shared.record(
+                seriesID: seriesID,
+                imageID: cover.id,
+                sourceURL: cover.url,
+                language: cover.language,
+                type: cover.type,
+                indexNumeric: cover.indexNumeric,
+                rating: rating
+            )
+        }
+
+        let correctionWasResolved = existingCoverSafetyCorrections.contains {
+            $0.matches(cover)
+        }
+        existingCoverSafetyCorrections.removeAll { $0.matches(cover) }
+        existingCoverSafetyCorrectionCount =
+            existingCoverSafetyCorrections.count
+        if correctionWasResolved {
+            let remaining = existingCoverSafetyCorrectionCount
+            status = remaining == 0
+                ? "Recorded the human cover ratings. No safety changes remain to review."
+                : "Recorded the human cover rating. \(remaining) safety change\(remaining == 1 ? "" : "s") remain to review."
+        }
+        imageChanged()
     }
 
     func setDraftImageNumber(
@@ -3996,13 +4479,17 @@ final class SableMangaBakaCoverStudioStore: ObservableObject {
             let key = "\(reference.provider.rawValue):\(reference.itemID)"
             guard seen.insert(key).inserted else { return nil }
 
-            let count = discovery.suggestions.filter {
-                $0.provider == reference.provider
-                    && (
-                        reference.itemType == "book"
-                            ? $0.providerItemID == reference.itemID
-                            : $0.providerSeriesID == reference.itemID
-                    )
+            let count = discovery.suggestions.filter { suggestion in
+                guard suggestion.provider == reference.provider else {
+                    return false
+                }
+                if reference.provider == .kyobo,
+                   reference.publicationTypeOverride == "digital" {
+                    return true
+                }
+                return reference.itemType == "book"
+                    ? suggestion.providerItemID == reference.itemID
+                    : suggestion.providerSeriesID == reference.itemID
             }.count
             if count > 0 {
                 return "\(reference.provider.displayName) \(reference.itemID): manual relationship and media type accepted; \(count) usable book, audiobook, or chapter cover\(count == 1 ? "" : "s") shown below for your review."
@@ -4380,6 +4867,7 @@ struct SableMangaBakaCoverStudioView: View {
     @State private var showStorefrontNotes = false
     @State private var showStorefrontInspector = false
     @State private var showCurrentCoverSet = false
+    @State private var showExistingCoverSafetyCorrections = false
     @State private var showScanDetails = false
     @State private var compositeReviewFilter:
         SableMangaBakaCompositeReviewFilter = .changes
@@ -4393,7 +4881,11 @@ struct SableMangaBakaCoverStudioView: View {
     @State private var expandedStorefrontLaneIDs: Set<String> = []
     @State private var expandedStorefrontImageIssueIDs: Set<String> = []
     @State private var expandedCoverInventoryGroupIDs: Set<String> = []
+    @State private var expandedCoverInventoryLanguageIDs: Set<String> = []
+    @State private var coverInventoryPageByLanguageID: [String: Int] = [:]
     @State private var contentRatingSuggestionID: String?
+
+    private static let coverInventoryPageSize = 48
 
     var body: some View {
         HSplitView {
@@ -4461,7 +4953,10 @@ struct SableMangaBakaCoverStudioView: View {
         }
         .onChange(of: store.selectedSeries?.id) { _, _ in
             showCurrentCoverSet = false
+            showExistingCoverSafetyCorrections = false
             expandedCoverInventoryGroupIDs.removeAll()
+            expandedCoverInventoryLanguageIDs.removeAll()
+            coverInventoryPageByLanguageID.removeAll()
             collapsedStorefrontLanguageIDs.removeAll()
             expandedLargeStorefrontLanguageID = nil
             collapsedStorefrontProviderSectionIDs.removeAll()
@@ -4493,6 +4988,16 @@ struct SableMangaBakaCoverStudioView: View {
         }
         .onChange(of: store.storefrontCompositeSlots.count) { _, _ in
             compositePage = 1
+        }
+        .onChange(of: store.coverInventoryLanguage) { _, _ in
+            expandedCoverInventoryLanguageIDs.removeAll()
+            coverInventoryPageByLanguageID.removeAll()
+        }
+        .onChange(of: store.existingCoverSafetyCorrectionCount) {
+            _, correctionCount in
+            if correctionCount == 0 {
+                showExistingCoverSafetyCorrections = false
+            }
         }
         .onReceive(
             NotificationCenter.default.publisher(
@@ -5315,7 +5820,7 @@ struct SableMangaBakaCoverStudioView: View {
             if !store.exactStoreSeriesOutcomes.isEmpty {
                 Divider()
                 VStack(alignment: .leading, spacing: 7) {
-                    Label("Exact Store Results", systemImage: "link.circle")
+                    Label("Exact Link Results", systemImage: "link.circle")
                         .font(.callout.weight(.semibold))
                     ForEach(store.exactStoreSeriesOutcomes, id: \.self) { outcome in
                         Label(
@@ -6873,12 +7378,12 @@ struct SableMangaBakaCoverStudioView: View {
 
                     VStack(alignment: .leading, spacing: 3) {
                         Label(
-                            "Use Store Series or Book URLs",
+                            "Use Store or Cover URLs",
                             systemImage: "link.badge.plus"
                         )
                         .font(.headline)
                         Text(
-                            "Use exact store series or single-book pages when automatic matching needs help."
+                            "Use exact store pages or direct cover images when automatic matching needs help."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -6890,14 +7395,14 @@ struct SableMangaBakaCoverStudioView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(
-                "\(showStoreSeriesURLs ? "Hide" : "Show") exact store link tools"
+                "\(showStoreSeriesURLs ? "Hide" : "Show") exact store and cover link tools"
             )
 
             if showStoreSeriesURLs {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text(
-                        "Paste BookLive, BookWalker, Amazon, Barnes & Noble, Audible, YES24, or Kyobo store pages, one per line. Series pages load the group; product pages load exact book results when the provider supports them."
+                        "Paste BookLive, BookWalker, Amazon, Barnes & Noble, Audible, YES24, or Kyobo store pages, or direct cover image links, one per line. Kyobo ebook pages load the complete embedded series shelf when available."
                     )
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -6987,12 +7492,12 @@ struct SableMangaBakaCoverStudioView: View {
                             .stroke(palette.border)
                     )
                     .accessibilityLabel(
-                        "BookLive, BookWalker, Amazon, Barnes & Noble, Audible, YES24, or Kyobo store URLs, one per line"
+                        "Store page or direct cover image URLs, one per line"
                     )
 
                 HStack {
                     Text(
-                        "Results appear in Provider Cover Results above. Chapter-only groups are returned as chapter covers, never as volumes; exact product pages add replacement candidates without clearing the whole provider group."
+                        "Store results appear in Provider Cover Results above. Direct images are checked at their maximum available size and added to the proposed cover set for review."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -7002,7 +7507,7 @@ struct SableMangaBakaCoverStudioView: View {
 
                     Button(action: store.scanStoreSeriesURLs) {
                         Label(
-                            "Scan Exact Links",
+                            "Scan Links",
                             systemImage: "scope"
                         )
                     }
@@ -7688,6 +8193,73 @@ struct SableMangaBakaCoverStudioView: View {
                 }
             }
 
+            if store.isCheckingExistingCoverSafety {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(
+                        "\(store.existingCoverSafetyProgressLabel) \(store.existingCoverSafetyCompleted) of \(store.existingCoverSafetyTotal) unique cover\(store.existingCoverSafetyTotal == 1 ? "" : "s")"
+                    )
+                    ProgressView(
+                        value: Double(store.existingCoverSafetyCompleted),
+                        total: Double(max(store.existingCoverSafetyTotal, 1))
+                    )
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 280)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+            } else if store.existingCoverSafetyDidComplete {
+                if store.existingCoverSafetyCorrectionCount == 0 {
+                    Label(
+                        "Checked \(store.existingCoverSafetyReviewedCount) cover\(store.existingCoverSafetyReviewedCount == 1 ? "" : "s"); current ratings agree",
+                        systemImage: "checkmark.shield"
+                    )
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                } else {
+                    Button {
+                        showExistingCoverSafetyCorrections.toggle()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Label(
+                                "\(store.existingCoverSafetyCorrectionCount) of \(store.existingCoverSafetyReviewedCount) safety ratings differ",
+                                systemImage: "exclamationmark.shield"
+                            )
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(palette.statusWarning)
+
+                            Spacer()
+
+                            Text(
+                                showExistingCoverSafetyCorrections
+                                    ? "Hide Changes"
+                                    : "Review Changes"
+                            )
+                            .font(.caption.weight(.semibold))
+                            Image(
+                                systemName:
+                                    showExistingCoverSafetyCorrections
+                                        ? "chevron.up"
+                                        : "chevron.down"
+                            )
+                            .font(.caption.weight(.semibold))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(
+                        showExistingCoverSafetyCorrections
+                            ? "Hide the covers with proposed safety changes"
+                            : "Show only the covers with proposed safety changes"
+                    )
+                }
+            }
+
+            if showExistingCoverSafetyCorrections,
+               store.existingCoverSafetyCorrectionCount > 0 {
+                existingCoverSafetyCorrectionReview()
+            }
+
             SableEagerAdaptiveGrid(
                 minimumItemWidth: 125,
                 horizontalSpacing: 10,
@@ -7744,14 +8316,61 @@ struct SableMangaBakaCoverStudioView: View {
         .sableCoverDataSurface(fill: palette.surface, border: palette.border)
     }
 
+    private func existingCoverSafetyCorrectionReview() -> some View {
+        let correctionIndices =
+            store.existingCoverSafetyCorrectionDraftIndices
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Divider()
+
+            HStack(spacing: 8) {
+                Label(
+                    "Affected Covers",
+                    systemImage: "exclamationmark.shield"
+                )
+                .font(.subheadline.weight(.semibold))
+                Text("\(correctionIndices.count)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            SableEagerAdaptiveGrid(
+                minimumItemWidth: 300,
+                maximumItemWidth: 440,
+                horizontalSpacing: 8,
+                verticalSpacing: 8
+            ) {
+                ForEach(correctionIndices, id: \.self) { index in
+                    if store.draftImages.indices.contains(index),
+                       let correction =
+                        store.existingCoverSafetyCorrection(
+                            atDraftIndex: index
+                        ) {
+                        currentDraftCoverRow(
+                            index,
+                            fallback: store.draftImages[index],
+                            safetyCorrection: correction
+                        )
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            "\(correctionIndices.count) covers with proposed safety rating changes"
+        )
+    }
+
     @ViewBuilder
     private func coverInventorySection(
         _ group: SableMangaBakaCoverInventoryGroup
     ) -> some View {
-        let editableIndices = store.draftImageIndices(in: group)
-        let liveOnlyCovers = store.liveOnlyCovers(in: group)
+        let count = store.coverInventoryCount(in: group)
+        let safetyChangeCount =
+            store.existingCoverSafetyCorrectionCount(in: group)
 
-        if !editableIndices.isEmpty || !liveOnlyCovers.isEmpty {
+        if count > 0 {
             VStack(alignment: .leading, spacing: 10) {
                 let isExpanded = expandedCoverInventoryGroupIDs
                     .contains(group.id)
@@ -7770,10 +8389,11 @@ struct SableMangaBakaCoverStudioView: View {
                         )
                         Label(group.title, systemImage: group.systemImage)
                             .font(.subheadline.weight(.semibold))
-                        Text("\(editableIndices.count + liveOnlyCovers.count)")
+                        Text("\(count)")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
+                        coverSafetyChangeLabel(safetyChangeCount)
                     }
                     .contentShape(Rectangle())
                 }
@@ -7784,35 +8404,204 @@ struct SableMangaBakaCoverStudioView: View {
                         : "Show these MangaBaka covers"
                 )
 
-            if isExpanded {
-                SableEagerAdaptiveGrid(
-                    minimumItemWidth: 300,
-                    maximumItemWidth: 440,
-                    horizontalSpacing: 8,
-                    verticalSpacing: 8
-                ) {
-                    ForEach(editableIndices, id: \.self) { index in
-                        if store.draftImages.indices.contains(index) {
-                            currentDraftCoverRow(
-                                    index,
-                                    fallback: store.draftImages[index]
-                                )
-                            }
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(
+                            store.coverInventoryLanguageCodes(in: group),
+                            id: \.self
+                        ) { language in
+                            coverInventoryLanguageSection(
+                                group,
+                                language: language
+                            )
                         }
-                    ForEach(liveOnlyCovers) { image in
-                        currentLiveCoverRow(image)
                     }
-                }
-                .padding(.leading, 20)
+                    .padding(.leading, 20)
                 }
             }
             .padding(.top, 4)
         }
     }
 
+    @ViewBuilder
+    private func coverInventoryLanguageSection(
+        _ group: SableMangaBakaCoverInventoryGroup,
+        language: String
+    ) -> some View {
+        let sectionID = "\(group.id):\(language)"
+        let editableIndices = store.draftImageIndices(
+            in: group,
+            language: language
+        )
+        let liveOnlyCovers = store.liveOnlyCovers(
+            in: group,
+            language: language
+        )
+        let totalCount = editableIndices.count + liveOnlyCovers.count
+        let safetyChangeCount =
+            store.existingCoverSafetyCorrectionCount(
+                in: group,
+                language: language
+            )
+        let pageSize = Self.coverInventoryPageSize
+        let pageCount = max(1, (totalCount + pageSize - 1) / pageSize)
+        let requestedPage = coverInventoryPageByLanguageID[sectionID] ?? 1
+        let page = min(max(requestedPage, 1), pageCount)
+        let pageStart = (page - 1) * pageSize
+        let editablePage = Array(
+            editableIndices.dropFirst(pageStart).prefix(pageSize)
+        )
+        let liveStart = max(0, pageStart - editableIndices.count)
+        let livePage = Array(
+            liveOnlyCovers.dropFirst(liveStart)
+                .prefix(pageSize - editablePage.count)
+        )
+        let isExpanded = expandedCoverInventoryLanguageIDs
+            .contains(sectionID)
+
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                if isExpanded {
+                    expandedCoverInventoryLanguageIDs.remove(sectionID)
+                } else {
+                    expandedCoverInventoryLanguageIDs.insert(sectionID)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(
+                        systemName: isExpanded
+                            ? "chevron.down"
+                            : "chevron.right"
+                    )
+                    Label(
+                        studioLanguageName(language),
+                        systemImage: "character.book.closed"
+                    )
+                    .font(.callout.weight(.semibold))
+                    Text("\(totalCount)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    coverSafetyChangeLabel(safetyChangeCount)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(
+                isExpanded
+                    ? "Hide these \(studioLanguageName(language)) covers"
+                    : "Show these \(studioLanguageName(language)) covers"
+            )
+
+            if isExpanded {
+                if pageCount > 1 {
+                    coverInventoryPager(
+                        sectionID: sectionID,
+                        page: page,
+                        pageCount: pageCount,
+                        pageStart: pageStart,
+                        totalCount: totalCount
+                    )
+                }
+
+                SableEagerAdaptiveGrid(
+                    minimumItemWidth: 300,
+                    maximumItemWidth: 440,
+                    horizontalSpacing: 8,
+                    verticalSpacing: 8
+                ) {
+                    ForEach(editablePage, id: \.self) { index in
+                        if store.draftImages.indices.contains(index) {
+                            currentDraftCoverRow(
+                                index,
+                                fallback: store.draftImages[index],
+                                safetyCorrection:
+                                    store.existingCoverSafetyCorrection(
+                                        atDraftIndex: index
+                                    )
+                            )
+                        }
+                    }
+                    ForEach(livePage) { image in
+                        currentLiveCoverRow(image)
+                    }
+                }
+
+                if pageCount > 1 {
+                    coverInventoryPager(
+                        sectionID: sectionID,
+                        page: page,
+                        pageCount: pageCount,
+                        pageStart: pageStart,
+                        totalCount: totalCount
+                    )
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func coverSafetyChangeLabel(_ count: Int) -> some View {
+        if count > 0 {
+            Label(
+                "\(count) triggered",
+                systemImage: "exclamationmark.shield.fill"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(palette.statusWarning)
+            .accessibilityLabel(
+                "\(count) safety rating change\(count == 1 ? "" : "s") to review"
+            )
+        }
+    }
+
+    private func coverInventoryPager(
+        sectionID: String,
+        page: Int,
+        pageCount: Int,
+        pageStart: Int,
+        totalCount: Int
+    ) -> some View {
+        let visibleUpperBound = min(
+            pageStart + Self.coverInventoryPageSize,
+            totalCount
+        )
+
+        return HStack(spacing: 8) {
+            Text(
+                "Page \(page) of \(pageCount) · Covers \(pageStart + 1)–\(visibleUpperBound) of \(totalCount)"
+            )
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button {
+                coverInventoryPageByLanguageID[sectionID] = page - 1
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            .disabled(page <= 1)
+            .help("Previous cover page")
+
+            Button {
+                coverInventoryPageByLanguageID[sectionID] = page + 1
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.borderless)
+            .disabled(page >= pageCount)
+            .help("Next cover page")
+        }
+        .accessibilityElement(children: .contain)
+    }
+
     private func currentDraftCoverRow(
         _ index: Int,
-        fallback image: SableMangaBakaCoverImage
+        fallback image: SableMangaBakaCoverImage,
+        safetyCorrection: SableMangaBakaCoverSafetyCorrection? = nil
     ) -> some View {
         let currentImage = store.draftImages.indices.contains(index)
             ? store.draftImages[index]
@@ -7836,6 +8625,32 @@ struct SableMangaBakaCoverStudioView: View {
                             .font(.caption.weight(.medium))
                             .foregroundStyle(palette.statusSuccess)
                     }
+                }
+
+                if let safetyCorrection {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label(
+                            "Safety scan triggered",
+                            systemImage: "exclamationmark.shield.fill"
+                        )
+                        .font(.caption.weight(.semibold))
+
+                        HStack(spacing: 6) {
+                            Text(safetyCorrection.originalRating.capitalized)
+                            Image(systemName: "arrow.right")
+                            Text(safetyCorrection.proposedRating.capitalized)
+                                .fontWeight(.semibold)
+                        }
+                        .font(.callout)
+                    }
+                    .foregroundStyle(palette.statusWarning)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        palette.statusWarning.opacity(0.10),
+                        in: RoundedRectangle(cornerRadius: 4)
+                    )
                 }
 
                 Text(sourceHostText(currentImage.imageURL))
@@ -7872,12 +8687,10 @@ struct SableMangaBakaCoverStudioView: View {
                         id: \.self
                     ) { rating in
                         Button {
-                            guard store.draftImages.indices.contains(index)
-                            else {
-                                return
-                            }
-                            store.draftImages[index].contentRating = rating
-                            store.imageChanged()
+                            store.setDraftImageContentRating(
+                                at: index,
+                                to: rating
+                            )
                         } label: {
                             if rating == currentImage.contentRating {
                                 Label(
@@ -7929,12 +8742,14 @@ struct SableMangaBakaCoverStudioView: View {
         .sableCoverRowSurface(
             fill: palette.surfaceRaised,
             border: palette.border,
-            accent: palette.accent,
-            isSelected: isDefault
+            accent: safetyCorrection == nil
+                ? palette.accent
+                : palette.statusWarning,
+            isSelected: isDefault || safetyCorrection != nil
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "\(studioLanguageName(currentImage.language)) \(currentImage.inventoryItemLabel), \(sizeText), \(currentImage.contentRating) cover"
+            "\(studioLanguageName(currentImage.language)) \(currentImage.inventoryItemLabel), \(sizeText), \(currentImage.contentRating) cover\(safetyCorrection.map { ", rating changed from \($0.originalRating)" } ?? "")"
         )
     }
 
@@ -8141,11 +8956,7 @@ struct SableMangaBakaCoverStudioView: View {
                     return store.draftImages[index].contentRating
                 },
                 set: {
-                    guard store.draftImages.indices.contains(index) else {
-                        return
-                    }
-                    store.draftImages[index].contentRating = $0
-                    store.imageChanged()
+                    store.setDraftImageContentRating(at: index, to: $0)
                 }
             )) {
                 ForEach(
@@ -8398,7 +9209,7 @@ struct SableMangaBakaCoverStudioView: View {
     }
 
     private var coverRatingHelp: String {
-        "Safe has no nudity, sexual themes, or suggestive poses. Suggestive includes mild sexual themes, partial or implied nudity, swimwear, lingerie, or provocative poses. Erotica includes full nudity without visible genitalia or a clear sexualized-body focus. Pornographic includes visible genitalia, sex acts, fluids, or sexual objects, even when censored."
+        "Safe has no sexualized nudity, sexual themes, or suggestive poses. Suggestive includes mild sexual themes, partial or implied nudity, any swimwear, lingerie, or provocative poses. Erotica includes visible nipples or buttocks, erotic near-nudity, sexualized lingerie focus, or bondage and restraint. Pornographic includes visible genitalia, sex acts, sexual fluids, or sex toys, including when censored."
     }
 
     private func studioLanguageName(_ value: String) -> String {

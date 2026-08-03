@@ -1,0 +1,83 @@
+{
+  "storage" : "model.espresso.weights",
+  "analyses" : {
+
+  },
+  "properties" : {
+
+  },
+  "format_version" : 200,
+  "metadata_in_weights" : [
+
+  ],
+  "layers" : [
+    {
+      "nB" : 2048,
+      "top" : "ReLUOutput0",
+      "has_biases" : 1,
+      "weights" : {
+
+      },
+      "nC" : 128,
+      "blob_weights" : 3,
+      "type" : "inner_product",
+      "has_relu" : 1,
+      "bottom" : "features",
+      "blob_biases" : 1,
+      "has_tanh" : 0,
+      "debug_info" : "DenseLayer0",
+      "name" : "DenseLayer0",
+      "has_prelu" : 0
+    },
+    {
+      "nB" : 128,
+      "top" : "ReLUOutput1",
+      "has_biases" : 1,
+      "weights" : {
+
+      },
+      "nC" : 64,
+      "blob_weights" : 7,
+      "type" : "inner_product",
+      "has_relu" : 1,
+      "bottom" : "ReLUOutput0",
+      "blob_biases" : 5,
+      "has_tanh" : 0,
+      "debug_info" : "DenseLayer1",
+      "name" : "DenseLayer1",
+      "has_prelu" : 0
+    },
+    {
+      "nB" : 64,
+      "top" : "LastDenseOutput",
+      "has_biases" : 1,
+      "weights" : {
+
+      },
+      "nC" : 4,
+      "blob_weights" : 11,
+      "type" : "inner_product",
+      "has_relu" : 0,
+      "bottom" : "ReLUOutput1",
+      "blob_biases" : 9,
+      "has_tanh" : 0,
+      "debug_info" : "LastDenseLayer",
+      "name" : "LastDenseLayer",
+      "has_prelu" : 0
+    },
+    {
+      "bottom" : "LastDenseOutput",
+      "attributes" : {
+        "is_output" : 1
+      },
+      "weights" : {
+
+      },
+      "debug_info" : "SoftmaxLayer",
+      "top" : "targetProbability",
+      "C" : 2,
+      "type" : "softmax",
+      "name" : "SoftmaxLayer"
+    }
+  ]
+}
